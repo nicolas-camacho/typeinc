@@ -1,0 +1,570 @@
+// Package game holds the shared typing-game logic, free of any rendering
+// or input-backend dependencies so both the desktop and TUI frontends can
+// drive it.
+package game
+
+import (
+	"fmt"
+	"math"
+	"math/rand/v2"
+	"strings"
+)
+
+// Scene identifies which screen the game is on.
+type Scene int
+
+const (
+	SceneMenu Scene = iota
+	SceneOptions
+	SceneIntro
+	ScenePlay
+	SceneShop
+)
+
+// Phase timings, in seconds.
+const (
+	SuccessTime    = 0.5 // green highlight + input lock after completing a word
+	ErrorFlashTime = 0.5 // pink highlight after a mistake
+	ErrorBlockTime = 0.5 // extra input lock after the error flash ends
+	CommandErrTime = 1.5 // "unknown command" message duration
+)
+
+// BaseStreakCap is how many streak words count toward the combo
+// multiplier before upgrades.
+const BaseStreakCap = 5
+
+// Upgrade describes one shop entry; the display name is localized via
+// UpgradeName. Cost at level n is BaseCost × 3ⁿ.
+type Upgrade struct {
+	ID       string
+	BaseCost int
+}
+
+// Upgrades lists the shop entries in display order.
+var Upgrades = []Upgrade{
+	{ID: "mult", BaseCost: 50},
+	{ID: "streakcap", BaseCost: 40},
+}
+
+// Phase is the sub-state within ScenePlay.
+type Phase int
+
+const (
+	PhaseTyping  Phase = iota
+	PhaseSuccess       // word completed: highlight + "+x", input locked
+	PhaseError         // mistake: flash, then a plain locked second
+)
+
+// Languages lists the word languages in display order.
+var Languages = []struct {
+	Label string
+	Code  string
+}{
+	{Label: "ESPANOL", Code: "es"},
+	{Label: "ENGLISH", Code: "en"},
+}
+
+// IntroCPS is the typewriter speed of the intro story, in characters per
+// second.
+const IntroCPS = 20.0
+
+// MenuItem is one main-menu entry.
+type MenuItem struct {
+	ID    string
+	Label string
+}
+
+// OptItemIDs lists the options screen entries in display order; labels
+// come from UI().
+var OptItemIDs = []string{"display", "volume", "back"}
+
+// Game is the full game state. Frontends mutate it only through methods.
+type Game struct {
+	Scene      Scene
+	MenuIndex  int      // selected entry in Languages
+	Words      []string // active word list
+	Word       string   // word currently being typed
+	Pos        int      // number of letters typed correctly so far
+	Score      int
+	Phase      Phase
+	PhaseTimer float64 // seconds left in the current non-typing phase
+	LastGain   int     // points awarded for the last completed word
+
+	// incremental state
+	Streak         int // consecutive completed words without a mistake
+	MultLevel      int // "mult" upgrade level
+	StreakCapLevel int // "streakcap" upgrade level
+
+	// command mode ("/..." pauses play)
+	CommandMode bool
+	CommandBuf  string
+	CommandErr  float64 // seconds the "unknown command" message stays visible
+
+	ShopIndex int // selected shop entry
+
+	// menu / session state
+	OptionsEnabled bool // frontend support for the options screen (desktop)
+	QuitRequested  bool // SALIR chosen; the frontend reads this and exits
+	LangIndex      int  // selected language (words + interface)
+	RunActive      bool // a run exists in memory, CONTINUAR resumes it
+
+	// persistence
+	SavePath string   // "" disables saving (tests)
+	savedRun *RunData // run loaded from disk, restored by CONTINUAR
+
+	// intro story (plays on every new game); CONTINUAR reuses the scene
+	// for a one-line HR quip
+	IntroLine   int
+	IntroShown  float64 // runes of the current line revealed so far
+	introReturn bool    // showing a return quip, not the full story
+	returnIdx   int     // quip picked for this return
+	lastReturn  int     // previous quip, to never repeat back-to-back
+
+	// options (applied by the desktop frontend)
+	DisplayMode int     // index into DisplayModeLabels
+	Volume      float64 // master volume 0..1
+	OptIndex    int     // selected options entry
+}
+
+// New returns a game sitting on the main menu.
+func New() *Game {
+	return &Game{Scene: SceneMenu, Volume: 0.4}
+}
+
+// HasSave reports whether CONTINUAR has something to resume: a run in
+// memory or one loaded from disk.
+func (g *Game) HasSave() bool {
+	return g.RunActive || g.savedRun != nil
+}
+
+// MenuItems builds the main menu in the interface language; CONTINUAR
+// only shows with a resumable run, OPCIONES only when the frontend
+// supports it.
+func (g *Game) MenuItems() []MenuItem {
+	ui := g.UI()
+	var items []MenuItem
+	if g.HasSave() {
+		items = append(items, MenuItem{ID: "continue", Label: ui.MenuContinue})
+	}
+	items = append(items,
+		MenuItem{ID: "new", Label: ui.MenuNew},
+		MenuItem{ID: "lang", Label: ui.MenuLang + ": " + Languages[g.LangIndex].Label},
+	)
+	if g.OptionsEnabled {
+		items = append(items, MenuItem{ID: "options", Label: ui.MenuOptions})
+	}
+	return append(items, MenuItem{ID: "quit", Label: ui.MenuQuit})
+}
+
+// MenuMove moves the menu selection by delta, wrapping around.
+func (g *Game) MenuMove(delta int) {
+	n := len(g.MenuItems())
+	g.MenuIndex = ((g.MenuIndex+delta)%n + n) % n
+}
+
+// menuItem is the highlighted entry, clamped in case the item list shrank.
+func (g *Game) menuItem() MenuItem {
+	items := g.MenuItems()
+	if g.MenuIndex >= len(items) {
+		g.MenuIndex = len(items) - 1
+	}
+	return items[g.MenuIndex]
+}
+
+// MenuAdjust handles left/right on the highlighted menu entry.
+func (g *Game) MenuAdjust(delta int) {
+	if g.menuItem().ID == "lang" {
+		g.cycleLang(delta)
+	}
+}
+
+// MenuSelect activates the highlighted menu entry.
+func (g *Game) MenuSelect() {
+	switch g.menuItem().ID {
+	case "continue":
+		g.continueRun()
+	case "new":
+		g.introReturn = false
+		g.IntroLine = 0
+		g.IntroShown = 0
+		g.Scene = SceneIntro
+	case "lang":
+		g.cycleLang(1)
+	case "options":
+		g.OptIndex = 0
+		g.Scene = SceneOptions
+	case "quit":
+		g.QuitRequested = true
+		g.Save()
+	}
+}
+
+// continueRun resumes the in-memory run (or restores the one from disk)
+// and greets the player with a short random HR quip before play.
+func (g *Game) continueRun() {
+	if !g.RunActive && g.savedRun != nil {
+		g.initRun()
+		g.Score = g.savedRun.Score
+		g.MultLevel = g.savedRun.MultLevel
+		g.StreakCapLevel = g.savedRun.StreakCapLevel
+		g.Streak = g.savedRun.Streak
+		g.savedRun = nil
+	}
+	if !g.RunActive {
+		g.initRun()
+	}
+
+	// pick a quip different from the previous one
+	n := len(ReturnScripts[Languages[g.LangIndex].Code])
+	idx := rand.IntN(n)
+	for idx == g.lastReturn && n > 1 {
+		idx = rand.IntN(n)
+	}
+	g.returnIdx = idx
+	g.lastReturn = idx
+	g.introReturn = true
+	g.IntroLine = 0
+	g.IntroShown = 0
+	g.Scene = SceneIntro
+}
+
+// cycleLang switches the language for words and interface. A running game
+// keeps its score and upgrades; only the word list (and current word)
+// changes.
+func (g *Game) cycleLang(delta int) {
+	n := len(Languages)
+	g.LangIndex = ((g.LangIndex+delta)%n + n) % n
+	if g.RunActive {
+		g.Words = WordLists[Languages[g.LangIndex].Code]
+		g.Word = ""
+		g.nextWord()
+	}
+	g.Save()
+}
+
+// initRun resets all run state for a brand-new game.
+func (g *Game) initRun() {
+	g.Words = WordLists[Languages[g.LangIndex].Code]
+	g.Score = 0
+	g.Phase = PhaseTyping
+	g.PhaseTimer = 0
+	g.Streak = 0
+	g.MultLevel = 0
+	g.StreakCapLevel = 0
+	g.CommandMode = false
+	g.CommandBuf = ""
+	g.CommandErr = 0
+	g.ShopIndex = 0
+	g.Word = ""
+	g.nextWord()
+	g.RunActive = true
+}
+
+// introScript is what the intro scene is currently showing: the full
+// story on a new game, or a single return quip on CONTINUAR.
+func (g *Game) introScript() []string {
+	code := Languages[g.LangIndex].Code
+	if g.introReturn {
+		return []string{ReturnScripts[code][g.returnIdx]}
+	}
+	return IntroScripts[code]
+}
+
+// introLine returns the current script line as runes (the script contains
+// multibyte characters).
+func (g *Game) introLine() []rune {
+	return []rune(g.introScript()[g.IntroLine])
+}
+
+// IntroVisible is the typewriter-revealed prefix of the current line.
+func (g *Game) IntroVisible() string {
+	line := g.introLine()
+	return string(line[:min(int(g.IntroShown), len(line))])
+}
+
+// IntroLineDone reports whether the current line is fully revealed.
+func (g *Game) IntroLineDone() bool {
+	return int(g.IntroShown) >= len(g.introLine())
+}
+
+// IntroEnter advances the intro: it completes a half-revealed line,
+// otherwise moves to the next one; after the last line a fresh run starts
+// (the intro only plays on NUEVA PARTIDA).
+func (g *Game) IntroEnter() {
+	if !g.IntroLineDone() {
+		g.IntroShown = float64(len(g.introLine()))
+		return
+	}
+	if g.IntroLine+1 < len(g.introScript()) {
+		g.IntroLine++
+		g.IntroShown = 0
+		return
+	}
+	if g.introReturn {
+		// the run was already restored by continueRun
+		g.introReturn = false
+		g.Scene = ScenePlay
+		return
+	}
+	g.initRun()
+	g.savedRun = nil
+	g.Scene = ScenePlay
+	g.Save()
+}
+
+// OptMove moves the options selection by delta, wrapping around.
+func (g *Game) OptMove(delta int) {
+	n := len(OptItemIDs)
+	g.OptIndex = ((g.OptIndex+delta)%n + n) % n
+}
+
+// OptAdjust handles left/right on the highlighted options entry.
+func (g *Game) OptAdjust(delta int) {
+	switch OptItemIDs[g.OptIndex] {
+	case "display":
+		n := len(g.UI().DisplayModes)
+		g.DisplayMode = ((g.DisplayMode+delta)%n + n) % n
+	case "volume":
+		g.Volume = math.Round(math.Min(1, math.Max(0, g.Volume+0.1*float64(delta)))*10) / 10
+	default:
+		return
+	}
+	g.Save()
+}
+
+// OptSelect activates the highlighted options entry.
+func (g *Game) OptSelect() {
+	switch OptItemIDs[g.OptIndex] {
+	case "display":
+		g.OptAdjust(1)
+	case "back":
+		g.Scene = SceneMenu
+	}
+}
+
+// OptLabel renders one options row in the interface language, including
+// its current value.
+func (g *Game) OptLabel(id string) string {
+	ui := g.UI()
+	switch id {
+	case "display":
+		return ui.OptDisplay + ": " + ui.DisplayModes[g.DisplayMode]
+	case "volume":
+		return fmt.Sprintf("%s: %d%%", ui.OptVolume, int(g.Volume*100+0.5))
+	case "back":
+		return ui.OptBack
+	}
+	return ""
+}
+
+// BackToMenu returns to the main menu.
+func (g *Game) BackToMenu() {
+	g.CommandMode = false
+	g.CommandBuf = ""
+	g.Scene = SceneMenu
+	g.Save()
+}
+
+// StreakCap is the number of streak words that count toward the combo.
+func (g *Game) StreakCap() int {
+	return BaseStreakCap + BaseStreakCap*g.StreakCapLevel
+}
+
+// ComboMult is the current streak multiplier: +10% per streak word, capped.
+func (g *Game) ComboMult() float64 {
+	return 1 + 0.1*float64(min(g.Streak, g.StreakCap()))
+}
+
+// WordGain is what completing the current word pays right now:
+// len × (1 + mult level) × combo multiplier, rounded.
+func (g *Game) WordGain() int {
+	return int(math.Round(float64(len(g.Word)) * float64(1+g.MultLevel) * g.ComboMult()))
+}
+
+// TypeChar feeds one typed character into the game. In command mode the
+// character goes to the command buffer. Otherwise, "/" opens command mode,
+// a correct letter advances the cursor, completing the word scores
+// WordGain() and enters PhaseSuccess, and a wrong letter enters PhaseError,
+// resetting both the cursor and the streak. Input is ignored outside
+// PhaseTyping.
+func (g *Game) TypeChar(r rune) {
+	if g.Scene != ScenePlay {
+		return
+	}
+	if g.CommandMode {
+		g.CommandBuf += string(r)
+		return
+	}
+	if g.Phase != PhaseTyping {
+		return
+	}
+	if r == '/' {
+		g.CommandMode = true
+		g.CommandBuf = "/"
+		g.CommandErr = 0
+		return
+	}
+	if g.Pos < len(g.Word) && rune(g.Word[g.Pos]) == r {
+		g.Pos++
+		if g.Pos == len(g.Word) {
+			g.Streak++
+			g.LastGain = g.WordGain()
+			g.Score += g.LastGain
+			g.Phase = PhaseSuccess
+			g.PhaseTimer = SuccessTime
+		}
+		return
+	}
+	g.Phase = PhaseError
+	g.PhaseTimer = ErrorFlashTime + ErrorBlockTime
+	g.Pos = 0
+	g.Streak = 0
+}
+
+// Tick advances time-based state; dt is in seconds. The intro reveals
+// characters at IntroCPS; in play, command mode pauses the phases, and
+// when a phase expires play returns to PhaseTyping (a finished success
+// phase also brings the next word).
+func (g *Game) Tick(dt float64) {
+	if g.CommandErr > 0 {
+		g.CommandErr = max(0, g.CommandErr-dt)
+	}
+	switch g.Scene {
+	case SceneIntro:
+		if !g.IntroLineDone() {
+			g.IntroShown = math.Min(g.IntroShown+dt*IntroCPS, float64(len(g.introLine())))
+		}
+	case ScenePlay:
+		if g.CommandMode || g.Phase == PhaseTyping {
+			return
+		}
+		g.PhaseTimer -= dt
+		if g.PhaseTimer <= 0 {
+			if g.Phase == PhaseSuccess {
+				g.nextWord()
+				g.Save() // autosave with the completed word banked
+			}
+			g.Phase = PhaseTyping
+			g.PhaseTimer = 0
+		}
+	}
+}
+
+// CommandBackspace deletes the last rune of the command buffer; deleting
+// the leading "/" leaves command mode.
+func (g *Game) CommandBackspace() {
+	if !g.CommandMode {
+		return
+	}
+	if len(g.CommandBuf) <= 1 {
+		g.CommandCancel()
+		return
+	}
+	runes := []rune(g.CommandBuf)
+	g.CommandBuf = string(runes[:len(runes)-1])
+}
+
+// CommandCancel leaves command mode discarding the buffer.
+func (g *Game) CommandCancel() {
+	g.CommandMode = false
+	g.CommandBuf = ""
+}
+
+// CommandSubmit executes the buffered command. Unknown commands show a
+// brief error message.
+func (g *Game) CommandSubmit() {
+	cmd := strings.ToLower(strings.TrimSpace(g.CommandBuf))
+	g.CommandCancel()
+	switch cmd {
+	case "/shop", "/tienda":
+		g.ShopIndex = 0
+		g.Scene = SceneShop
+	case "/menu":
+		g.Scene = SceneMenu
+		g.Save()
+	default:
+		g.CommandErr = CommandErrTime
+	}
+}
+
+// ShopMove moves the shop selection by delta, wrapping around.
+func (g *Game) ShopMove(delta int) {
+	n := len(Upgrades)
+	g.ShopIndex = ((g.ShopIndex+delta)%n + n) % n
+}
+
+// ShopBuy purchases the selected upgrade if the score covers its cost.
+func (g *Game) ShopBuy() bool {
+	up := Upgrades[g.ShopIndex]
+	cost := g.UpgradeCost(up.ID)
+	if g.Score < cost {
+		return false
+	}
+	g.Score -= cost
+	switch up.ID {
+	case "mult":
+		g.MultLevel++
+	case "streakcap":
+		g.StreakCapLevel++
+	}
+	g.Save()
+	return true
+}
+
+// ExitShop returns from the shop to play.
+func (g *Game) ExitShop() {
+	g.Scene = ScenePlay
+}
+
+// UpgradeLevel returns the owned level of an upgrade.
+func (g *Game) UpgradeLevel(id string) int {
+	switch id {
+	case "mult":
+		return g.MultLevel
+	case "streakcap":
+		return g.StreakCapLevel
+	}
+	return 0
+}
+
+// UpgradeCost is the price of the next level: BaseCost × 3^level.
+func (g *Game) UpgradeCost(id string) int {
+	cost := 0
+	for _, up := range Upgrades {
+		if up.ID == id {
+			cost = up.BaseCost
+		}
+	}
+	for range g.UpgradeLevel(id) {
+		cost *= 3
+	}
+	return cost
+}
+
+// UpgradeEffect describes what buying the next level changes, e.g.
+// "x1 → x2" for the point multiplier or "5 → 10" for the streak cap.
+func (g *Game) UpgradeEffect(id string) string {
+	switch id {
+	case "mult":
+		return fmt.Sprintf("x%d → x%d", 1+g.MultLevel, 2+g.MultLevel)
+	case "streakcap":
+		return fmt.Sprintf("%d → %d", g.StreakCap(), g.StreakCap()+BaseStreakCap)
+	}
+	return ""
+}
+
+// ErrorFlashing reports whether the pink error highlight is currently
+// visible (the first second of PhaseError).
+func (g *Game) ErrorFlashing() bool {
+	return g.Phase == PhaseError && g.PhaseTimer > ErrorBlockTime
+}
+
+// nextWord picks a random word, avoiding an immediate repeat.
+func (g *Game) nextWord() {
+	next := g.Words[rand.IntN(len(g.Words))]
+	for next == g.Word && len(g.Words) > 1 {
+		next = g.Words[rand.IntN(len(g.Words))]
+	}
+	g.Word = next
+	g.Pos = 0
+}

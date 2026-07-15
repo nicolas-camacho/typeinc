@@ -70,21 +70,29 @@ func loadFont(size int32) rl.Font {
 // applyDisplayMode switches between fullscreen, a 1280x720 window, and a
 // borderless full-monitor window. It first leaves whatever special state
 // the window is in.
+//
+// NOTE: rl.SetWindowSize is unusable here — raylib-go's purego binding
+// preps it with a wrong ffi signature and panics ("too many arguments"),
+// so window sizes only change through the toggles, which manage size
+// themselves. The recover keeps a failing native call from killing the
+// game (the bad mode would be saved and brick every startup).
 func applyDisplayMode(mode int) {
+	defer func() { _ = recover() }()
+
 	if rl.IsWindowFullscreen() {
 		rl.ToggleFullscreen()
 	}
 	if rl.IsWindowState(rl.FlagBorderlessWindowedMode) {
 		rl.ToggleBorderlessWindowed()
 	}
-	monitor := rl.GetCurrentMonitor()
-	mw, mh := rl.GetMonitorWidth(monitor), rl.GetMonitorHeight(monitor)
+	// the window is now decorated at its original 1280x720
 	switch mode {
-	case 0: // COMPLETA: exclusive fullscreen at monitor resolution
-		rl.SetWindowSize(mw, mh)
+	case 0: // COMPLETA: grow to monitor size via borderless, then go exclusive
+		rl.ToggleBorderlessWindowed()
 		rl.ToggleFullscreen()
-	case 1: // VENTANA: decorated window, centered
-		rl.SetWindowSize(1280, 720)
+	case 1: // VENTANA: recenter the restored 1280x720 window
+		monitor := rl.GetCurrentMonitor()
+		mw, mh := rl.GetMonitorWidth(monitor), rl.GetMonitorHeight(monitor)
 		rl.SetWindowPosition((mw-1280)/2, (mh-720)/2)
 	case 2: // SIN BORDE: borderless window covering the monitor
 		rl.ToggleBorderlessWindowed()

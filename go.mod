@@ -5,7 +5,7 @@ go 1.25.0
 require (
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
-	github.com/gen2brain/raylib-go/raylib v0.60.0
+	github.com/gen2brain/raylib-go/raylib v0.60.1-0.20260619180708-8f9e96aca992
 )
 
 require (

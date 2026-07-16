@@ -12,16 +12,30 @@ type RunData struct {
 	MultLevel      int
 	StreakCapLevel int
 	Streak         int
+	Day            int
+	DayTimer       float64
+	DayWords       int
+	DayFails       int
+	DayFailCounts  map[string]int
 }
 
 // SaveData is the on-disk save file, shared by the desktop and TUI
-// frontends.
+// frontends. HR fields live outside Run: they survive across runs.
 type SaveData struct {
 	Version     int
 	Run         *RunData // nil when no run is saved
 	LangIndex   int
 	Volume      float64
 	DisplayMode int
+
+	HRPoints     int
+	HRMultLevel  int
+	HRDayLevel   int
+	HRQuotaLevel int
+
+	TotalWords int
+	TotalFails int
+	FailCounts map[string]int
 }
 
 // DefaultSavePath is the shared save location
@@ -42,10 +56,19 @@ func (g *Game) Save() {
 		return
 	}
 	data := SaveData{
-		Version:     1,
+		Version:     2,
 		LangIndex:   g.LangIndex,
 		Volume:      g.Volume,
 		DisplayMode: g.DisplayMode,
+
+		HRPoints:     g.HRPoints,
+		HRMultLevel:  g.HRMultLevel,
+		HRDayLevel:   g.HRDayLevel,
+		HRQuotaLevel: g.HRQuotaLevel,
+
+		TotalWords: g.TotalWords,
+		TotalFails: g.TotalFails,
+		FailCounts: g.FailCounts,
 	}
 	if g.RunActive {
 		data.Run = &RunData{
@@ -53,6 +76,11 @@ func (g *Game) Save() {
 			MultLevel:      g.MultLevel,
 			StreakCapLevel: g.StreakCapLevel,
 			Streak:         g.Streak,
+			Day:            g.Day,
+			DayTimer:       g.DayTimer,
+			DayWords:       g.DayWords,
+			DayFails:       g.DayFails,
+			DayFailCounts:  g.dayFailCounts,
 		}
 	} else if g.savedRun != nil {
 		data.Run = g.savedRun
@@ -90,6 +118,27 @@ func (g *Game) Load() {
 	}
 	if data.DisplayMode >= 0 && data.DisplayMode < len(uiTables["es"].DisplayModes) {
 		g.DisplayMode = data.DisplayMode
+	}
+	if data.HRPoints > 0 {
+		g.HRPoints = data.HRPoints
+	}
+	if data.HRMultLevel > 0 {
+		g.HRMultLevel = data.HRMultLevel
+	}
+	if data.HRDayLevel > 0 {
+		g.HRDayLevel = data.HRDayLevel
+	}
+	if data.HRQuotaLevel > 0 {
+		g.HRQuotaLevel = min(data.HRQuotaLevel, HRQuotaMax)
+	}
+	if data.TotalWords > 0 {
+		g.TotalWords = data.TotalWords
+	}
+	if data.TotalFails > 0 {
+		g.TotalFails = data.TotalFails
+	}
+	if data.FailCounts != nil {
+		g.FailCounts = data.FailCounts
 	}
 	g.savedRun = data.Run
 }

@@ -1,6 +1,9 @@
 package game
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // startPlay puts a game into ScenePlay with a known word, skipping the
 // intro story.
@@ -216,15 +219,15 @@ func TestLanguageChangeKeepsProgress(t *testing.T) {
 func TestQuitAndOptionsMenuEntries(t *testing.T) {
 	g := New()
 	items := g.MenuItems()
-	if len(items) != 3 { // new, lang, quit — no save, no options support
-		t.Fatalf("MenuItems() = %d entries without options, want 3", len(items))
+	if len(items) != 5 { // new, lang, hr, stats, quit — no save, no options support
+		t.Fatalf("MenuItems() = %d entries without options, want 5", len(items))
 	}
 	g.OptionsEnabled = true
 	items = g.MenuItems()
-	if len(items) != 4 || items[2].ID != "options" {
-		t.Fatalf("MenuItems() with options = %d entries, [2] = %q, want 4, \"options\"", len(items), items[2].ID)
+	if len(items) != 6 || items[4].ID != "options" {
+		t.Fatalf("MenuItems() with options = %d entries, [4] = %q, want 6, \"options\"", len(items), items[4].ID)
 	}
-	g.MenuIndex = 3 // SALIR
+	g.MenuIndex = 5 // SALIR
 	g.MenuSelect()
 	if !g.QuitRequested {
 		t.Fatal("QuitRequested = false after SALIR, want true")
@@ -377,6 +380,340 @@ func TestOptionsAdjust(t *testing.T) {
 	g.OptSelect()
 	if g.Scene != SceneMenu {
 		t.Fatalf("Scene = %v after VOLVER, want SceneMenu", g.Scene)
+	}
+}
+
+func TestDayQuotaScalesWithDayUpgradesAndHR(t *testing.T) {
+	g := startPlay(t, "casa")
+	if got := g.DayQuota(); got != 100 {
+		t.Fatalf("DayQuota() day 1 = %d, want 100", got)
+	}
+	g.Day = 3 // 100 × 1.5² = 225
+	if got := g.DayQuota(); got != 225 {
+		t.Fatalf("DayQuota() day 3 = %d, want 225", got)
+	}
+	g.MultLevel = 2 // ×1.5
+	g.StreakCapLevel = 1
+	if got := g.DayQuota(); got != 360 { // 225 × 1.6
+		t.Fatalf("DayQuota() with upgrades = %d, want 360", got)
+	}
+	g.HRQuotaLevel = 5 // −50%
+	if got := g.DayQuota(); got != 180 {
+		t.Fatalf("DayQuota() with max hrquota = %d, want 180", got)
+	}
+}
+
+func TestDayTimerRunsOnlyInActivePlay(t *testing.T) {
+	g := startPlay(t, "casa")
+	if g.Day != 1 || g.DayTimer != DayBaseTime {
+		t.Fatalf("Day = %d, DayTimer = %v after initRun, want 1, %v", g.Day, g.DayTimer, DayBaseTime)
+	}
+	g.Tick(1)
+	if g.DayTimer != DayBaseTime-1 {
+		t.Fatalf("DayTimer = %v after 1s of play, want %v", g.DayTimer, DayBaseTime-1)
+	}
+	g.TypeChar('/') // command mode pauses the clock
+	g.Tick(5)
+	if g.DayTimer != DayBaseTime-1 {
+		t.Fatalf("DayTimer = %v after ticking in command mode, want %v", g.DayTimer, DayBaseTime-1)
+	}
+	g.CommandCancel()
+	g.Scene = SceneShop // shop pauses it too
+	g.Tick(5)
+	if g.DayTimer != DayBaseTime-1 {
+		t.Fatalf("DayTimer = %v after ticking in shop, want %v", g.DayTimer, DayBaseTime-1)
+	}
+}
+
+func TestDayEndPaydayChargesAndAdvances(t *testing.T) {
+	g := startPlay(t, "casa")
+	g.Score = 130 // covers the 100 quota
+	g.DayTimer = 0.01
+	g.Tick(0.02)
+	if g.Scene != SceneDayEnd || g.DayEndFired {
+		t.Fatalf("Scene = %v, fired = %v at day end with funds, want SceneDayEnd payday", g.Scene, g.DayEndFired)
+	}
+	if g.Score != 30 || g.HRPoints != 1 || g.Day != 2 {
+		t.Fatalf("Score = %d, HRPoints = %d, Day = %d, want 30, 1, 2", g.Score, g.HRPoints, g.Day)
+	}
+	if g.DayTimer != g.DayLength() {
+		t.Fatalf("DayTimer = %v after payday, want %v", g.DayTimer, g.DayLength())
+	}
+	if g.DayEndQuota != 100 || g.DayEndGainHR != 1 {
+		t.Fatalf("summary quota %d, gain %d, want 100, 1", g.DayEndQuota, g.DayEndGainHR)
+	}
+	if !g.DayEndFirst {
+		t.Fatal("DayEndFirst = false on the first payday, want true (HR points explained)")
+	}
+	// the first payday explains HR points across several lines: numbers
+	// only show on the last one
+	if lines := len(HRExplainScripts["es"]); lines < 2 {
+		t.Fatalf("HRExplainScripts has %d lines, want a multi-line script", lines)
+	}
+	if g.DayEndSummary() {
+		t.Fatal("DayEndSummary() = true on line 0 of the explain script, want false")
+	}
+	for i := 0; g.Scene == SceneDayEnd; i++ {
+		if i > 2*len(HRExplainScripts["es"])+2 {
+			t.Fatal("DayEndEnter never left SceneDayEnd")
+		}
+		g.DayEndEnter() // completes each line, then advances
+	}
+	if g.Scene != SceneDayStart || g.DayStartText == "" {
+		t.Fatalf("Scene = %v, DayStartText = %q after payday Enters, want SceneDayStart with a quip", g.Scene, g.DayStartText)
+	}
+	g.DayStartEnter() // reveal
+	g.DayStartEnter() // dismiss
+	if g.Scene != ScenePlay || !g.RunActive {
+		t.Fatalf("Scene = %v, RunActive = %v after morning Enter, want ScenePlay, true", g.Scene, g.RunActive)
+	}
+}
+
+func TestDayEndFiringEndsRunKeepsHRPoints(t *testing.T) {
+	g := startPlay(t, "casa")
+	g.HRPoints = 7
+	g.Score = 40 // below the 100 quota
+	g.DayTimer = 0.01
+	g.Tick(0.02)
+	if g.Scene != SceneDayEnd || !g.DayEndFired {
+		t.Fatalf("Scene = %v, fired = %v at day end without funds, want SceneDayEnd fired", g.Scene, g.DayEndFired)
+	}
+	if g.RunActive || g.savedRun != nil {
+		t.Fatalf("RunActive = %v, savedRun = %v after firing, want false, nil", g.RunActive, g.savedRun)
+	}
+	if g.HRPoints != 7 {
+		t.Fatalf("HRPoints = %d after firing, want 7 (kept)", g.HRPoints)
+	}
+	g.DayEndEnter()
+	g.DayEndEnter()
+	if g.Scene != SceneMenu || g.HasSave() {
+		t.Fatalf("Scene = %v, HasSave = %v after firing Enter, want SceneMenu, false", g.Scene, g.HasSave())
+	}
+}
+
+func TestDayEndWaitsForSuccessPhase(t *testing.T) {
+	g := startPlay(t, "sol")
+	g.Score = 200
+	g.DayTimer = 0.01
+	typeWord(g, "sol") // enters PhaseSuccess before the clock runs out
+	g.Tick(0.02)       // timer hits 0 mid-success: day must not end yet
+	if g.Scene != ScenePlay {
+		t.Fatalf("Scene = %v mid-success at timer 0, want ScenePlay", g.Scene)
+	}
+	g.Tick(SuccessTime) // success finishes, word banked, then the day ends
+	if g.Scene != SceneDayEnd {
+		t.Fatalf("Scene = %v after success phase, want SceneDayEnd", g.Scene)
+	}
+	if g.Score != 200+g.LastGain-100 {
+		t.Fatalf("Score = %d, want word banked before the 100 quota", g.Score)
+	}
+}
+
+func TestHRShopBuyAndCaps(t *testing.T) {
+	g := New()
+	g.HRPoints = 10
+	g.HRIndex = 0 // hrmult, base cost 3
+	if !g.HRBuy() {
+		t.Fatal("HRBuy() = false with enough HR points, want true")
+	}
+	if g.HRPoints != 7 || g.HRMultLevel != 1 {
+		t.Fatalf("HRPoints = %d, HRMultLevel = %d, want 7, 1", g.HRPoints, g.HRMultLevel)
+	}
+	if g.HRUpgradeCost("hrmult") != 6 {
+		t.Fatalf("HRUpgradeCost(hrmult) = %d at level 1, want 6", g.HRUpgradeCost("hrmult"))
+	}
+	g.HRIndex = 2 // hrquota capped at HRQuotaMax
+	g.HRQuotaLevel = HRQuotaMax
+	g.HRPoints = 9999
+	if g.HRBuy() {
+		t.Fatal("HRBuy() = true at hrquota cap, want false")
+	}
+	if !g.HRUpgradeMaxed("hrquota") {
+		t.Fatal("HRUpgradeMaxed(hrquota) = false at cap, want true")
+	}
+}
+
+func TestHRMetaUpgradesAffectRun(t *testing.T) {
+	g := startPlay(t, "casa")
+	g.Streak = 0
+	base := g.WordGain() // 4 × 1 × 1.0
+	g.HRMultLevel = 5    // +50%
+	if got := g.WordGain(); got != base+base/2 {
+		t.Fatalf("WordGain() = %d with hrmult 5, want %d", got, base+base/2)
+	}
+	g.HRDayLevel = 2
+	if got := g.DayLength(); got != DayBaseTime+2*DayTimeBonus {
+		t.Fatalf("DayLength() = %v with hrday 2, want %v", got, DayBaseTime+2*DayTimeBonus)
+	}
+}
+
+func TestHRCommandAndMenuEntry(t *testing.T) {
+	g := startPlay(t, "casa")
+	g.TypeChar('/')
+	typeWord(g, "rrhh")
+	g.CommandSubmit()
+	if g.Scene != SceneHR {
+		t.Fatalf("Scene = %v after /rrhh, want SceneHR", g.Scene)
+	}
+	g.ExitHR()
+	if g.Scene != ScenePlay {
+		t.Fatalf("Scene = %v after ExitHR from play, want ScenePlay", g.Scene)
+	}
+
+	g.BackToMenu()
+	g.MenuIndex = 3 // RRHH (continue, new, lang, hr)
+	if g.MenuItems()[3].ID != "hr" {
+		t.Fatalf("MenuItems()[3].ID = %q, want \"hr\"", g.MenuItems()[3].ID)
+	}
+	g.MenuSelect()
+	if g.Scene != SceneHR {
+		t.Fatalf("Scene = %v after menu RRHH, want SceneHR", g.Scene)
+	}
+	g.ExitHR()
+	if g.Scene != SceneMenu {
+		t.Fatalf("Scene = %v after ExitHR from menu, want SceneMenu", g.Scene)
+	}
+}
+
+func TestSaveLoadKeepsHRAndDay(t *testing.T) {
+	path := t.TempDir() + "/save.json"
+
+	g := startPlay(t, "casa")
+	g.SavePath = path
+	g.Score = 300
+	g.Day = 4
+	g.DayTimer = 42.5
+	g.HRPoints = 12
+	g.HRMultLevel = 1
+	g.HRDayLevel = 1
+	g.HRQuotaLevel = 2
+	g.Save()
+
+	g2 := New()
+	g2.SavePath = path
+	g2.Load()
+	if g2.HRPoints != 12 || g2.HRMultLevel != 1 || g2.HRDayLevel != 1 || g2.HRQuotaLevel != 2 {
+		t.Fatalf("HR after Load = %d pts, mult %d, day %d, quota %d; want 12, 1, 1, 2",
+			g2.HRPoints, g2.HRMultLevel, g2.HRDayLevel, g2.HRQuotaLevel)
+	}
+	g2.MenuIndex = 0 // CONTINUAR
+	g2.MenuSelect()
+	g2.IntroEnter()
+	g2.IntroEnter()
+	if g2.Day != 4 || g2.DayTimer != 42.5 {
+		t.Fatalf("restored day = %d, timer = %v, want 4, 42.5", g2.Day, g2.DayTimer)
+	}
+}
+
+func TestDayEndQuipsMatchAcrossLanguages(t *testing.T) {
+	if len(PaydayScripts["es"]) != len(PaydayScripts["en"]) {
+		t.Fatalf("payday scripts differ in length: es %d, en %d",
+			len(PaydayScripts["es"]), len(PaydayScripts["en"]))
+	}
+	if len(FiredScripts["es"]) != len(FiredScripts["en"]) {
+		t.Fatalf("fired scripts differ in length: es %d, en %d",
+			len(FiredScripts["es"]), len(FiredScripts["en"]))
+	}
+	if len(DayStartScripts["es"]) != len(DayStartScripts["en"]) {
+		t.Fatalf("day-start scripts differ in length: es %d, en %d",
+			len(DayStartScripts["es"]), len(DayStartScripts["en"]))
+	}
+	if len(DayStartStatScripts["es"]) != len(DayStartStatScripts["en"]) {
+		t.Fatalf("day-start stat scripts differ in length: es %d, en %d",
+			len(DayStartStatScripts["es"]), len(DayStartStatScripts["en"]))
+	}
+	if len(HRExplainScripts["es"]) != len(HRExplainScripts["en"]) || len(HRExplainScripts["es"]) == 0 {
+		t.Fatalf("HR explain scripts differ in length: es %d, en %d",
+			len(HRExplainScripts["es"]), len(HRExplainScripts["en"]))
+	}
+}
+
+func TestStatsCountWordsAndFails(t *testing.T) {
+	g := startPlay(t, "sol")
+	typeWord(g, "sol")
+	g.Tick(SuccessTime + 0.01)
+	g.Word, g.Pos = "mar", 0 // force a known word
+	g.TypeChar('x')          // fail on "mar"
+	g.Tick(ErrorFlashTime + ErrorBlockTime + 0.01)
+	g.TypeChar('x') // fail on "mar" again
+	if g.DayWords != 1 || g.DayFails != 2 {
+		t.Fatalf("DayWords = %d, DayFails = %d, want 1, 2", g.DayWords, g.DayFails)
+	}
+	if g.TotalWords != 1 || g.TotalFails != 2 {
+		t.Fatalf("TotalWords = %d, TotalFails = %d, want 1, 2", g.TotalWords, g.TotalFails)
+	}
+	if w, n := worstWord(g.dayFailCounts); w != "mar" || n != 2 {
+		t.Fatalf("worstWord = %q (%d), want \"mar\" (2)", w, n)
+	}
+
+	// day end banks the stats and resets the day counters
+	g.Tick(ErrorFlashTime + ErrorBlockTime + 0.01)
+	g.Score = 999
+	g.DayTimer = 0.001
+	g.Tick(0.01)
+	if g.LastDayWords != 1 || g.LastDayFails != 2 || g.LastDayWorst != "mar" || g.LastDayWorstN != 2 {
+		t.Fatalf("LastDay = %d words, %d fails, worst %q (%d); want 1, 2, \"mar\", 2",
+			g.LastDayWords, g.LastDayFails, g.LastDayWorst, g.LastDayWorstN)
+	}
+	if g.DayWords != 0 || g.DayFails != 0 || len(g.dayFailCounts) != 0 {
+		t.Fatalf("day counters not reset after payday: %d words, %d fails, %d map entries",
+			g.DayWords, g.DayFails, len(g.dayFailCounts))
+	}
+	if g.TotalWords != 1 || g.TotalFails != 2 {
+		t.Fatalf("global stats changed at day end: %d words, %d fails, want 1, 2", g.TotalWords, g.TotalFails)
+	}
+}
+
+func TestTopFailWords(t *testing.T) {
+	g := New()
+	g.FailCounts = map[string]int{"casa": 5, "sol": 2, "mar": 5, "pan": 1}
+	top := g.TopFailWords(3)
+	if len(top) != 3 {
+		t.Fatalf("TopFailWords(3) = %d entries, want 3", len(top))
+	}
+	// ties broken alphabetically: casa(5), mar(5), sol(2)
+	if top[0].Word != "casa" || top[1].Word != "mar" || top[2].Word != "sol" {
+		t.Fatalf("TopFailWords order = %q, %q, %q; want casa, mar, sol", top[0].Word, top[1].Word, top[2].Word)
+	}
+}
+
+func TestGlobalStatsSurviveFiringAndReload(t *testing.T) {
+	path := t.TempDir() + "/save.json"
+
+	g := startPlay(t, "casa")
+	g.SavePath = path
+	g.TypeChar('x') // one global fail on "casa"
+	g.Tick(ErrorFlashTime + ErrorBlockTime + 0.01)
+	g.Score = 0 // guarantee a firing
+	g.DayTimer = 0.001
+	g.Tick(0.01)
+	if !g.DayEndFired {
+		t.Fatal("expected a firing")
+	}
+
+	g2 := New()
+	g2.SavePath = path
+	g2.Load()
+	if g2.TotalFails != 1 || g2.FailCounts["casa"] != 1 {
+		t.Fatalf("global stats after firing+reload = %d fails, casa %d; want 1, 1",
+			g2.TotalFails, g2.FailCounts["casa"])
+	}
+	if g2.HasSave() {
+		t.Fatal("HasSave() = true after a firing, want false (run erased)")
+	}
+}
+
+func TestDayStartStatQuipFillsPlaceholders(t *testing.T) {
+	g := startPlay(t, "casa")
+	g.LastDayWords = 12
+	g.LastDayFails = 3
+	g.LastDayWorst = "burocracia"
+	g.LastDayWorstN = 2
+	for range 50 {
+		g.composeDayStart()
+		if strings.Contains(g.DayStartText, "{") {
+			t.Fatalf("unfilled placeholder in day-start quip: %q", g.DayStartText)
+		}
 	}
 }
 

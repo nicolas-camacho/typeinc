@@ -8,15 +8,21 @@ import (
 
 // RunData is the persisted state of a run in progress.
 type RunData struct {
-	Score          int
-	MultLevel      int
-	StreakCapLevel int
-	Streak         int
-	Day            int
-	DayTimer       float64
-	DayWords       int
-	DayFails       int
-	DayFailCounts  map[string]int
+	Score            int
+	MultLevel        int
+	StreakCapLevel   int
+	GoldenLevel      int
+	InternCount      int // interns owned; words/progress are rebuilt fresh
+	InternSpeedLevel int
+	EventsToday      int // persisted so save-quit-resume can't farm extra events
+	Streak           int
+	Day              int
+	DayTimer         float64
+	DayQuota         int // quota locked at day start (0 in old saves: recompute)
+	DayWords         int
+	DayFails         int
+	DayBestStreak    int
+	DayFailCounts    map[string]int
 }
 
 // SaveData is the on-disk save file, shared by the desktop and TUI
@@ -28,13 +34,17 @@ type SaveData struct {
 	Volume      float64
 	DisplayMode int
 
-	HRPoints     int
-	HRMultLevel  int
-	HRDayLevel   int
-	HRQuotaLevel int
+	HRPoints      int
+	HRMultLevel   int
+	HRDayLevel    int
+	HRQuotaLevel  int
+	HRInternLevel int
+	HREndLevel    int
 
 	TotalWords int
 	TotalFails int
+	BestStreak int
+	BestDay    int
 	FailCounts map[string]int
 }
 
@@ -61,26 +71,36 @@ func (g *Game) Save() {
 		Volume:      g.Volume,
 		DisplayMode: g.DisplayMode,
 
-		HRPoints:     g.HRPoints,
-		HRMultLevel:  g.HRMultLevel,
-		HRDayLevel:   g.HRDayLevel,
-		HRQuotaLevel: g.HRQuotaLevel,
+		HRPoints:      g.HRPoints,
+		HRMultLevel:   g.HRMultLevel,
+		HRDayLevel:    g.HRDayLevel,
+		HRQuotaLevel:  g.HRQuotaLevel,
+		HRInternLevel: g.HRInternLevel,
+		HREndLevel:    g.HREndLevel,
 
 		TotalWords: g.TotalWords,
 		TotalFails: g.TotalFails,
+		BestStreak: g.BestStreak,
+		BestDay:    g.BestDay,
 		FailCounts: g.FailCounts,
 	}
 	if g.RunActive {
 		data.Run = &RunData{
-			Score:          g.Score,
-			MultLevel:      g.MultLevel,
-			StreakCapLevel: g.StreakCapLevel,
-			Streak:         g.Streak,
-			Day:            g.Day,
-			DayTimer:       g.DayTimer,
-			DayWords:       g.DayWords,
-			DayFails:       g.DayFails,
-			DayFailCounts:  g.dayFailCounts,
+			Score:            g.Score,
+			MultLevel:        g.MultLevel,
+			StreakCapLevel:   g.StreakCapLevel,
+			GoldenLevel:      g.GoldenLevel,
+			InternCount:      len(g.Interns),
+			InternSpeedLevel: g.InternSpeedLevel,
+			EventsToday:      g.EventsToday,
+			Streak:           g.Streak,
+			Day:              g.Day,
+			DayTimer:         g.DayTimer,
+			DayQuota:         g.dayQuota,
+			DayWords:         g.DayWords,
+			DayFails:         g.DayFails,
+			DayBestStreak:    g.DayBestStreak,
+			DayFailCounts:    g.dayFailCounts,
 		}
 	} else if g.savedRun != nil {
 		data.Run = g.savedRun
@@ -131,11 +151,23 @@ func (g *Game) Load() {
 	if data.HRQuotaLevel > 0 {
 		g.HRQuotaLevel = min(data.HRQuotaLevel, HRQuotaMax)
 	}
+	if data.HRInternLevel > 0 {
+		g.HRInternLevel = min(data.HRInternLevel, HRInternMax)
+	}
+	if data.HREndLevel > 0 {
+		g.HREndLevel = 1
+	}
 	if data.TotalWords > 0 {
 		g.TotalWords = data.TotalWords
 	}
 	if data.TotalFails > 0 {
 		g.TotalFails = data.TotalFails
+	}
+	if data.BestStreak > 0 {
+		g.BestStreak = data.BestStreak
+	}
+	if data.BestDay > 0 {
+		g.BestDay = data.BestDay
 	}
 	if data.FailCounts != nil {
 		g.FailCounts = data.FailCounts

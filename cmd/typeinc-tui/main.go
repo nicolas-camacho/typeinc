@@ -3,6 +3,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"strings"
 	"time"
@@ -24,6 +25,7 @@ var (
 	errorStyle     = lipgloss.NewStyle().Background(lipgloss.Color("#D6336C")).Foreground(lipgloss.Color("#FFFFFF"))
 	successStyle   = lipgloss.NewStyle().Background(lipgloss.Color("#2FA084")).Foreground(lipgloss.Color("#FFFFFF"))
 	goldStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD700")).Bold(true)
+	goldGhostStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFD700")).Faint(true)
 	dimStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("245")).Faint(true)
 	errorTextStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#D6336C")).Bold(true)
 	comboStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF6B35")).Bold(true)
@@ -215,18 +217,22 @@ func (m model) styledWord() string {
 	if m.g.Phase == game.PhaseSuccess {
 		return successStyle.Render(" " + w + " ")
 	}
+	typedSt, ghostSt := typedStyle, ghostStyle
+	if m.g.WordGolden {
+		typedSt, ghostSt = goldStyle, goldGhostStyle
+	}
 	var b strings.Builder
 	b.WriteString(" ")
 	if m.g.Pos > 0 {
-		b.WriteString(typedStyle.Render(w[:m.g.Pos]))
+		b.WriteString(typedSt.Render(w[:m.g.Pos]))
 	}
 	if m.g.Pos < len(w) {
 		if m.g.Phase == game.PhaseTyping {
 			b.WriteString(cursorStyle.Render(string(w[m.g.Pos])))
 		} else {
-			b.WriteString(ghostStyle.Render(string(w[m.g.Pos])))
+			b.WriteString(ghostSt.Render(string(w[m.g.Pos])))
 		}
-		b.WriteString(ghostStyle.Render(w[m.g.Pos+1:]))
+		b.WriteString(ghostSt.Render(w[m.g.Pos+1:]))
 	}
 	b.WriteString(" ")
 	return b.String()
@@ -235,10 +241,15 @@ func (m model) styledWord() string {
 func (m model) viewPlay() string {
 	ui := m.g.UI()
 
-	// points gained floats above the word; streak + combo sit below it
+	// points gained floats above the word (a golden or urgent word
+	// announces itself there while typing); streak + combo sit below it
 	gain := " "
 	if m.g.Phase == game.PhaseSuccess {
 		gain = goldStyle.Render(fmt.Sprintf("+%d", m.g.LastGain))
+	} else if m.g.Phase == game.PhaseTyping && m.g.InspectionActive() {
+		gain = errorTextStyle.Render(fmt.Sprintf("%s %d", ui.InspectionLabel, int(math.Ceil(m.g.InspectionLeft()))))
+	} else if m.g.Phase == game.PhaseTyping && m.g.WordGolden {
+		gain = goldStyle.Render(ui.GoldenLabel)
 	}
 	streakSt := dimStyle
 	if m.g.ComboMult() > 1 {
@@ -246,13 +257,34 @@ func (m model) viewPlay() string {
 	}
 	streak := streakSt.Render(fmt.Sprintf("%s %d · x%.1f", strings.ToLower(ui.StreakLabel), m.g.Streak, m.g.ComboMult()))
 	center := lipgloss.JoinVertical(lipgloss.Center, gain, "", m.styledWord(), "", streak)
-	word := lipgloss.Place(m.width, m.height-3, lipgloss.Center, lipgloss.Center, center)
 
-	// score, day and quota, top-right
+	// interns column on the far left; the word keeps the remaining width
+	wordH := m.height - 4
+	word := lipgloss.Place(m.width, wordH, lipgloss.Center, lipgloss.Center, center)
+	if interns := m.internColumn(); interns != "" {
+		internW := lipgloss.Width(interns) + 2
+		col := lipgloss.Place(internW, wordH, lipgloss.Left, lipgloss.Center,
+			lipgloss.NewStyle().PaddingLeft(1).Render(interns))
+		rest := lipgloss.Place(max(1, m.width-internW), wordH, lipgloss.Center, lipgloss.Center, center)
+		word = lipgloss.JoinHorizontal(lipgloss.Top, col, rest)
+	}
+
+	// score, day and quota, top-right; the coffee-frenzy banner, top-left
 	top := dimStyle.Render(fmt.Sprintf("%s %d  ", ui.DayLabel, m.g.Day)) +
 		dimStyle.Render(fmt.Sprintf("%s %d  ", ui.QuotaLabel, m.g.DayQuota())) +
 		goldStyle.Render(fmt.Sprintf("%d ", m.g.Score))
 	topLine := lipgloss.PlaceHorizontal(m.width, lipgloss.Right, top)
+	if m.g.FrenzyActive() {
+		banner := goldStyle.Render(fmt.Sprintf(" %s %d", ui.FrenzyLabel, int(math.Ceil(m.g.FrenzyLeft()))))
+		topLine = banner + lipgloss.PlaceHorizontal(max(1, m.width-lipgloss.Width(banner)), lipgloss.Right, top)
+	}
+
+	// event announce line under the top row, visible for the whole event
+	toast := " "
+	if m.g.EventToastVisible() {
+		toast = dimStyle.Render(m.g.EventToast)
+	}
+	toastLine := lipgloss.PlaceHorizontal(m.width, lipgloss.Center, toast)
 
 	// command bar / unknown-command message above the day bar
 	bottom := " "
@@ -263,7 +295,31 @@ func (m model) viewPlay() string {
 	}
 	bottomLine := lipgloss.PlaceHorizontal(m.width, lipgloss.Center, bottom)
 
-	return topLine + "\n" + word + "\n" + bottomLine + "\n" + m.dayBar()
+	return topLine + "\n" + toastLine + "\n" + word + "\n" + bottomLine + "\n" + m.dayBar()
+}
+
+// internColumn renders one line per intern: typed prefix bright, the rest
+// as a ghost, plus a brief gold "+n" flash on completion. Empty string
+// when no interns are hired.
+func (m model) internColumn() string {
+	if len(m.g.Interns) == 0 {
+		return ""
+	}
+	lines := make([]string, 0, len(m.g.Interns))
+	for _, in := range m.g.Interns {
+		var b strings.Builder
+		if in.Pos > 0 {
+			b.WriteString(typedStyle.Render(in.Word[:in.Pos]))
+		}
+		if in.Pos < len(in.Word) {
+			b.WriteString(ghostStyle.Render(in.Word[in.Pos:]))
+		}
+		if in.GainTimer > 0 {
+			b.WriteString(goldStyle.Render(fmt.Sprintf(" +%d", in.LastGain)))
+		}
+		lines = append(lines, b.String())
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, lines...)
 }
 
 // dayBar renders the very-bottom day progress bar, filling as the day
@@ -290,16 +346,20 @@ func (m model) viewShop() string {
 	var b strings.Builder
 	b.WriteString(titleStyle.Render(spaced(m.g.UI().ShopTitle)))
 	b.WriteString("\n\n\n")
-	for i, up := range game.Upgrades {
+	for i, up := range m.g.ShopItems() {
 		level := m.g.UpgradeLevel(up.ID)
 		cost := m.g.UpgradeCost(up.ID)
 		line := fmt.Sprintf("%s  nv.%d  %s   ", m.g.UpgradeName(up.ID), level, m.g.UpgradeEffect(up.ID))
 
-		priceStyle := goldStyle
-		if m.g.Score < cost {
-			priceStyle = errorTextStyle
+		var price string
+		switch {
+		case m.g.UpgradeMaxed(up.ID):
+			price = dimStyle.Render(strings.ToLower(m.g.UI().MaxedLabel))
+		case m.g.Score < cost:
+			price = errorTextStyle.Render(fmt.Sprintf("%d", cost))
+		default:
+			price = goldStyle.Render(fmt.Sprintf("%d", cost))
 		}
-		price := priceStyle.Render(fmt.Sprintf("%d", cost))
 
 		if i == m.g.ShopIndex {
 			b.WriteString(typedStyle.Render("> "+line) + price)
@@ -309,6 +369,10 @@ func (m model) viewShop() string {
 		b.WriteString("\n")
 	}
 	b.WriteString("\n")
+	if m.g.ShopQuipText != "" {
+		b.WriteString(dimStyle.Render(m.g.ShopQuipText))
+		b.WriteString("\n\n")
+	}
 	b.WriteString(dimStyle.Render(strings.ToLower(m.g.UI().ShopHint)))
 
 	body := lipgloss.Place(m.width, m.height-1, lipgloss.Center, lipgloss.Center,
@@ -340,11 +404,16 @@ func (m model) viewDayEnd() string {
 		if m.g.LastDayWorst != "" {
 			worst = fmt.Sprintf("%s (%d)", m.g.LastDayWorst, m.g.LastDayWorstN)
 		}
-		stats = dimStyle.Render(fmt.Sprintf("%s: %d · %s: %d · %s: %s",
-			ui.StatsWords, m.g.LastDayWords, ui.StatsFails, m.g.LastDayFails, ui.StatsWorst, worst))
+		stats = dimStyle.Render(fmt.Sprintf("%s: %d · %s: %d · %s: %d · %s: %s",
+			ui.StatsWords, m.g.LastDayWords, ui.StatsFails, m.g.LastDayFails,
+			ui.StatsStreak, m.g.LastDayBestStreak, ui.StatsWorst, worst))
 		breakdown = errorTextStyle.Render(fmt.Sprintf("%s: -%d", ui.QuotaLabel, m.g.DayEndQuota))
 		if !m.g.DayEndFired {
-			breakdown += "   " + goldStyle.Render(fmt.Sprintf("%s: +%d", ui.HRPointsLbl, m.g.DayEndGainHR))
+			if m.g.DayEndGainHR > 0 {
+				breakdown += "   " + goldStyle.Render(fmt.Sprintf("%s: +%d", ui.HRPointsLbl, m.g.DayEndGainHR))
+			} else {
+				breakdown += "   " + dimStyle.Render(fmt.Sprintf("%s %d", ui.NextPayLabel, m.g.DayEndNextPay))
+			}
 		}
 	}
 
@@ -376,6 +445,10 @@ func (m model) viewStats() string {
 	b.WriteString(typedStyle.Render(fmt.Sprintf("%s: %d", ui.StatsWords, m.g.TotalWords)))
 	b.WriteString("\n")
 	b.WriteString(typedStyle.Render(fmt.Sprintf("%s: %d", ui.StatsFails, m.g.TotalFails)))
+	b.WriteString("\n")
+	b.WriteString(typedStyle.Render(fmt.Sprintf("%s: %d", ui.StatsStreak, m.g.BestStreak)))
+	b.WriteString("\n")
+	b.WriteString(typedStyle.Render(fmt.Sprintf("%s: %d", ui.StatsBestDay, m.g.BestDay)))
 	b.WriteString("\n\n")
 	b.WriteString(dimStyle.Render(ui.StatsTop))
 	b.WriteString("\n")
@@ -423,6 +496,10 @@ func (m model) viewHR() string {
 		b.WriteString("\n")
 	}
 	b.WriteString("\n")
+	if m.g.HRQuipText != "" {
+		b.WriteString(dimStyle.Render(m.g.HRQuipText))
+		b.WriteString("\n\n")
+	}
 	b.WriteString(dimStyle.Render(strings.ToLower(ui.HRHint)))
 
 	body := lipgloss.Place(m.width, m.height-1, lipgloss.Center, lipgloss.Center,

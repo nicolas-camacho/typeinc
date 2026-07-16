@@ -4,6 +4,7 @@ package main
 import (
 	_ "embed"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 
@@ -28,13 +29,14 @@ const (
 )
 
 var (
-	bgColor      = rl.NewColor(0x2C, 0x2C, 0x2C, 0xFF)
-	ghostColor   = rl.NewColor(0xFF, 0xFF, 0xFF, 0x55) // faint word to type over
-	dimColor     = rl.NewColor(0xFF, 0xFF, 0xFF, 0x66) // unselected menu entries
-	goldColor    = rl.NewColor(0xFF, 0xD7, 0x00, 0xFF)
-	errorColor   = rl.NewColor(0xD6, 0x33, 0x6C, 0xFF) // wrong-key word highlight
-	successColor = rl.NewColor(0x2F, 0xA0, 0x84, 0xFF) // completed-word highlight
-	comboColor   = rl.NewColor(0xFF, 0x6B, 0x35, 0xFF) // active combo multiplier
+	bgColor        = rl.NewColor(0x2C, 0x2C, 0x2C, 0xFF)
+	ghostColor     = rl.NewColor(0xFF, 0xFF, 0xFF, 0x55) // faint word to type over
+	goldGhostColor = rl.NewColor(0xFF, 0xD7, 0x00, 0x55) // faint golden word to type over
+	dimColor       = rl.NewColor(0xFF, 0xFF, 0xFF, 0x66) // unselected menu entries
+	goldColor      = rl.NewColor(0xFF, 0xD7, 0x00, 0xFF)
+	errorColor     = rl.NewColor(0xD6, 0x33, 0x6C, 0xFF) // wrong-key word highlight
+	successColor   = rl.NewColor(0x2F, 0xA0, 0x84, 0xFF) // completed-word highlight
+	comboColor     = rl.NewColor(0xFF, 0x6B, 0x35, 0xFF) // active combo multiplier
 
 	// day progress bar: blue start, purple past halfway, red in the last 10%
 	barBlue   = rl.NewColor(0x1B, 0x4E, 0xF5, 0xFF)
@@ -406,12 +408,23 @@ func drawPlay(g *game.Game, f fonts) {
 	}
 
 	// ghost word with the correctly typed prefix drawn on top; monospace
-	// font keeps both perfectly aligned
-	rl.DrawTextEx(f.word, g.Word, pos, wordSize, 0, ghostColor)
+	// font keeps both perfectly aligned; golden words render in gold, an
+	// urgent (inspection) word announces itself with its countdown
+	ghost, typed := ghostColor, rl.White
+	if g.WordGolden {
+		ghost, typed = goldGhostColor, goldColor
+		if g.Phase == game.PhaseTyping {
+			drawCentered(f.ui, g.UI().GoldenLabel, pos.Y-uiSize-24, uiSize, goldColor)
+		}
+	} else if g.InspectionActive() && g.Phase == game.PhaseTyping {
+		label := fmt.Sprintf("%s %d", g.UI().InspectionLabel, int(math.Ceil(g.InspectionLeft())))
+		drawCentered(f.ui, label, pos.Y-uiSize-24, uiSize, errorColor)
+	}
+	rl.DrawTextEx(f.word, g.Word, pos, wordSize, 0, ghost)
 	prefixW := float32(0)
 	if g.Pos > 0 {
 		prefix := g.Word[:g.Pos]
-		rl.DrawTextEx(f.word, prefix, pos, wordSize, 0, rl.White)
+		rl.DrawTextEx(f.word, prefix, pos, wordSize, 0, typed)
 		prefixW = rl.MeasureTextEx(f.word, prefix, wordSize, 0).X
 	}
 
@@ -442,6 +455,16 @@ func drawPlay(g *game.Game, f fonts) {
 	qm := rl.MeasureTextEx(f.ui, quota, uiSize, 0)
 	rl.DrawTextEx(f.ui, quota, rl.Vector2{X: screenW - qm.X - 32, Y: 24 + (sm.Y+8)*2}, uiSize, 0, dimColor)
 
+	// event announce line, top center, visible for the whole event; the
+	// frenzy countdown banner sits right below it
+	if g.EventToastVisible() {
+		drawCentered(f.ui, g.EventToast, 24, uiSize, dimColor)
+	}
+	if g.FrenzyActive() {
+		banner := fmt.Sprintf("%s %d", ui.FrenzyLabel, int(math.Ceil(g.FrenzyLeft())))
+		drawCentered(f.ui, banner, 24+uiSize*1.4, uiSize, goldColor)
+	}
+
 	// command bar / unknown-command message, bottom center
 	if g.CommandMode {
 		drawCentered(f.ui, g.CommandBuf+"_", screenH-uiSize*3, uiSize, rl.White)
@@ -449,7 +472,31 @@ func drawPlay(g *game.Game, f fonts) {
 		drawCentered(f.ui, g.UI().UnknownCmd, screenH-uiSize*3, uiSize, errorColor)
 	}
 
+	drawInterns(g, f)
 	drawDayBar(g, f)
+}
+
+// drawInterns stacks the interns' words on the far left, each with its
+// typed prefix bright and a brief gold "+n" flash on completion.
+func drawInterns(g *game.Game, f fonts) {
+	if len(g.Interns) == 0 {
+		return
+	}
+	lineH := float32(uiSize) * 1.8
+	y := (screenH - lineH*float32(len(g.Interns))) / 2
+	for _, in := range g.Interns {
+		pos := rl.Vector2{X: 32, Y: y}
+		rl.DrawTextEx(f.ui, in.Word, pos, uiSize, 0, ghostColor)
+		w := rl.MeasureTextEx(f.ui, in.Word, uiSize, 0).X
+		if in.Pos > 0 {
+			rl.DrawTextEx(f.ui, in.Word[:in.Pos], pos, uiSize, 0, rl.White)
+		}
+		if in.GainTimer > 0 {
+			gain := "+" + strconv.Itoa(in.LastGain)
+			rl.DrawTextEx(f.ui, gain, rl.Vector2{X: 32 + w + 16, Y: y}, uiSize, 0, goldColor)
+		}
+		y += lineH
+	}
 }
 
 // drawDayBar renders the day progress bar along the very bottom, filling
@@ -480,11 +527,14 @@ func drawDayBar(g *game.Game, f fonts) {
 func drawShop(g *game.Game, f fonts) {
 	drawCentered(f.title, g.UI().ShopTitle, screenH*0.2, titleSize, rl.White)
 
-	for i, up := range game.Upgrades {
+	for i, up := range g.ShopItems() {
 		level := g.UpgradeLevel(up.ID)
 		cost := g.UpgradeCost(up.ID)
 		line := g.UpgradeName(up.ID) + "  NV." + strconv.Itoa(level) + "  " + g.UpgradeEffect(up.ID) + "   "
 		price := strconv.Itoa(cost)
+		if g.UpgradeMaxed(up.ID) {
+			price = g.UI().MaxedLabel
+		}
 
 		color := dimColor
 		if i == g.ShopIndex {
@@ -500,7 +550,9 @@ func drawShop(g *game.Game, f fonts) {
 		rl.DrawTextEx(f.ui, line, pos, uiSize, 0, color)
 
 		priceColor := goldColor
-		if g.Score < cost {
+		if g.UpgradeMaxed(up.ID) {
+			priceColor = dimColor
+		} else if g.Score < cost {
 			priceColor = errorColor
 		}
 		lineW := rl.MeasureTextEx(f.ui, line, uiSize, 0).X
@@ -511,6 +563,11 @@ func drawShop(g *game.Game, f fonts) {
 	score := strconv.Itoa(g.Score)
 	sm := rl.MeasureTextEx(f.ui, score, uiSize, 0)
 	rl.DrawTextEx(f.ui, score, rl.Vector2{X: screenW - sm.X - 32, Y: 24}, uiSize, 0, goldColor)
+
+	// HR's hiring quip, dim, above the hint
+	if g.ShopQuipText != "" {
+		drawCentered(f.ui, g.ShopQuipText, screenH-uiSize*5, uiSize, dimColor)
+	}
 
 	drawCentered(f.ui, g.UI().ShopHint, screenH-uiSize*3, uiSize, ghostColor)
 }
@@ -542,16 +599,22 @@ func drawDayEnd(g *game.Game, f fonts) {
 		if g.LastDayWorst != "" {
 			worst = fmt.Sprintf("%s (%d)", g.LastDayWorst, g.LastDayWorstN)
 		}
-		stats := fmt.Sprintf("%s: %d · %s: %d · %s: %s",
-			ui.StatsWords, g.LastDayWords, ui.StatsFails, g.LastDayFails, ui.StatsWorst, worst)
+		stats := fmt.Sprintf("%s: %d · %s: %d · %s: %d · %s: %s",
+			ui.StatsWords, g.LastDayWords, ui.StatsFails, g.LastDayFails,
+			ui.StatsStreak, g.LastDayBestStreak, ui.StatsWorst, worst)
 		drawCentered(f.ui, stats, y, uiSize, dimColor)
 		y += lineH
 
-		// settlement breakdown
+		// settlement breakdown; HR points only land on payroll days, the
+		// rest show when the next payroll comes
 		drawCentered(f.ui, ui.QuotaLabel+": -"+strconv.Itoa(g.DayEndQuota), y, uiSize, errorColor)
 		if !g.DayEndFired {
 			y += lineH
-			drawCentered(f.ui, ui.HRPointsLbl+": +"+strconv.Itoa(g.DayEndGainHR), y, uiSize, goldColor)
+			if g.DayEndGainHR > 0 {
+				drawCentered(f.ui, ui.HRPointsLbl+": +"+strconv.Itoa(g.DayEndGainHR), y, uiSize, goldColor)
+			} else {
+				drawCentered(f.ui, ui.NextPayLabel+" "+strconv.Itoa(g.DayEndNextPay), y, uiSize, dimColor)
+			}
 		}
 	}
 	if g.DayEndQuipDone() {
@@ -584,6 +647,10 @@ func drawStats(g *game.Game, f fonts) {
 	rl.DrawTextEx(f.ui, fmt.Sprintf("%s: %d", ui.StatsWords, g.TotalWords), rl.Vector2{X: x, Y: y}, uiSize, 0, rl.White)
 	y += lineH
 	rl.DrawTextEx(f.ui, fmt.Sprintf("%s: %d", ui.StatsFails, g.TotalFails), rl.Vector2{X: x, Y: y}, uiSize, 0, rl.White)
+	y += lineH
+	rl.DrawTextEx(f.ui, fmt.Sprintf("%s: %d", ui.StatsStreak, g.BestStreak), rl.Vector2{X: x, Y: y}, uiSize, 0, rl.White)
+	y += lineH
+	rl.DrawTextEx(f.ui, fmt.Sprintf("%s: %d", ui.StatsBestDay, g.BestDay), rl.Vector2{X: x, Y: y}, uiSize, 0, rl.White)
 	y += lineH * 1.5
 	rl.DrawTextEx(f.ui, ui.StatsTop, rl.Vector2{X: x, Y: y}, uiSize, 0, dimColor)
 	y += lineH
@@ -638,6 +705,11 @@ func drawHR(g *game.Game, f fonts) {
 	pts := ui.HRPointsLbl + ": " + strconv.Itoa(g.HRPoints)
 	pm := rl.MeasureTextEx(f.ui, pts, uiSize, 0)
 	rl.DrawTextEx(f.ui, pts, rl.Vector2{X: screenW - pm.X - 32, Y: 24}, uiSize, 0, goldColor)
+
+	// HR's purchase quip, dim, above the hint
+	if g.HRQuipText != "" {
+		drawCentered(f.ui, g.HRQuipText, screenH-uiSize*5, uiSize, dimColor)
+	}
 
 	drawCentered(f.ui, ui.HRHint, screenH-uiSize*3, uiSize, ghostColor)
 }

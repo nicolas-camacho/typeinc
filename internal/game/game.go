@@ -40,13 +40,88 @@ const (
 const BaseStreakCap = 5
 
 // Day/quota tuning: a day lasts DayBaseTime seconds of active play; at its
-// end HR charges DayQuota() — not covering it means getting fired.
+// end HR charges DayQuota() — not covering it means getting fired. The
+// quota is locked at day start: upgrades bought mid-day only inflate the
+// NEXT day's quota.
 const (
-	DayBaseTime  = 90.0 // seconds per day before upgrades (1.5 min)
-	DayTimeBonus = 15.0 // extra seconds per "hrday" level
-	QuotaBase    = 100  // day-1 quota before scaling
-	QuotaGrowth  = 1.5  // per-day exponential growth
-	HRQuotaMax   = 5    // "hrquota" level cap (−10% each, max −50%)
+	DayBaseTime     = 90.0 // seconds per day before upgrades (1.5 min)
+	DayTimeBonus    = 15.0 // extra seconds per "hrday" level
+	QuotaBase       = 100  // day-1 quota before scaling
+	QuotaGrowth     = 1.55 // per-day exponential growth
+	QuotaMultTerm   = 0.35 // quota inflation per "mult" level
+	QuotaStreakTerm = 0.15 // quota inflation per "streakcap" level
+	HRQuotaMax      = 5    // "hrquota" level cap (−10% each, max −50%)
+)
+
+// HR payroll tuning: HR points are only paid on days multiple of
+// HRPayCycle, and the payout is day/HRPayDivisor (integer division):
+// day 3 → 1, day 6 → 3, day 9 → 4, day 12 → 6… Getting fired mid-cycle
+// forfeits that cycle.
+const (
+	HRPayCycle   = 3 // a payroll lands every Nth day
+	HRPayDivisor = 2 // payout on a payroll day = day / HRPayDivisor
+)
+
+// hrGainForDay is how many HR points closing the given day pays.
+func hrGainForDay(day int) int {
+	if day%HRPayCycle != 0 {
+		return 0
+	}
+	return day / HRPayDivisor
+}
+
+// Golden-word tuning: each new player word has a chance of coming out
+// golden, paying a multiplied gain. The "golden" shop upgrade raises both
+// the chance and the multiplier, and inflates the quota in return.
+const (
+	GoldenBaseChance     = 0.02 // base chance the next player word is golden
+	GoldenChancePerLevel = 0.01 // +1% chance per "golden" shop level
+	GoldenBaseMult       = 3.0  // golden payout multiplier at level 0
+	GoldenMultPerLevel   = 0.5  // +0.5x payout per level
+	GoldenMaxLevel       = 8    // level cap: 10% chance, ×7 payout
+	QuotaGoldenTerm      = 0.08 // quota inflation per golden level
+)
+
+// Intern tuning: an intern types its own words in the HUD's left column,
+// banking WordGain without the combo or golden bonuses. One intern per run
+// by default; the "hrintern" meta upgrade raises the per-run headcount.
+const (
+	InternBaseCost       = 1500 // first intern; each next one costs ×3
+	InternBaseCPS        = 1.5  // letters per second at speed level 0
+	InternCPSPerLevel    = 0.75 // extra letters/sec per "internspeed" level
+	InternSpeedBaseCost  = 750  // "internspeed" base cost (×3 per level)
+	InternWordRest       = 0.5  // pause after an intern finishes a word (HUD readability)
+	InternGainFlash      = 0.8  // seconds the intern "+n" flash stays visible
+	HRInternMax          = 3    // "hrintern" level cap: up to 4 interns per run
+	QuotaInternTerm      = 0.25 // quota inflation per intern owned
+	QuotaInternSpeedTerm = 0.08 // quota inflation per "internspeed" level
+)
+
+// Intern is one hired auto-typer: it types Word letter by letter and banks
+// the gain on completion. Frontends only read the exported fields.
+type Intern struct {
+	Word      string
+	Pos       int     // letters typed so far
+	LastGain  int     // last payout, for the HUD flash
+	GainTimer float64 // seconds the payout flash stays visible
+	acc       float64 // fractional letters accumulated
+	rest      float64 // post-word pause left
+}
+
+// Office-event tuning: during active play the game occasionally rolls an
+// event — a coffee frenzy (everything pays double for a while) or an HR
+// inspection (the next word is urgent: typed in time it pays a bonus,
+// expired it just goes back to normal — never a punishment).
+// EventMinSpacing > FrenzyDuration guarantees events never overlap.
+const (
+	EventCheckInterval   = 5.0  // seconds of active play between event rolls
+	EventChance          = 0.10 // trigger chance per roll (~1.8 expected/day)
+	EventMinSpacing      = 20.0 // min active seconds between events
+	EventMaxPerDay       = 3
+	FrenzyDuration       = 10.0
+	FrenzyMult           = 2.0 // ×2 on ALL income: player words and interns
+	InspectionTime       = 8.0 // seconds to finish the urgent word
+	InspectionRewardMult = 3.0 // urgent word completed in time pays ×3
 )
 
 // Upgrade describes one shop entry; the display name is localized via
@@ -58,16 +133,21 @@ type Upgrade struct {
 
 // Upgrades lists the shop entries in display order.
 var Upgrades = []Upgrade{
-	{ID: "mult", BaseCost: 50},
-	{ID: "streakcap", BaseCost: 40},
+	{ID: "mult", BaseCost: 75},
+	{ID: "streakcap", BaseCost: 60},
+	{ID: "golden", BaseCost: 250},
+	{ID: "intern", BaseCost: InternBaseCost},
+	{ID: "internspeed", BaseCost: InternSpeedBaseCost},
 }
 
 // HRUpgrades lists the meta-shop entries, paid with HR points and kept
 // across runs. Cost at level n is BaseCost × 2ⁿ.
 var HRUpgrades = []Upgrade{
-	{ID: "hrmult", BaseCost: 3},
-	{ID: "hrday", BaseCost: 2},
-	{ID: "hrquota", BaseCost: 3},
+	{ID: "hrmult", BaseCost: 5},
+	{ID: "hrday", BaseCost: 4},
+	{ID: "hrquota", BaseCost: 6},
+	{ID: "hrintern", BaseCost: 25},
+	{ID: "hrend", BaseCost: 40},
 }
 
 // Phase is the sub-state within ScenePlay.
@@ -109,6 +189,7 @@ type Game struct {
 	Words      []string // active word list
 	Word       string   // word currently being typed
 	Pos        int      // number of letters typed correctly so far
+	WordGolden bool     // current word is golden: it pays GoldenMult()
 	Score      int
 	Phase      Phase
 	PhaseTimer float64 // seconds left in the current non-typing phase
@@ -118,51 +199,82 @@ type Game struct {
 	Streak         int // consecutive completed words without a mistake
 	MultLevel      int // "mult" upgrade level
 	StreakCapLevel int // "streakcap" upgrade level
+	GoldenLevel    int // "golden" upgrade level
+
+	// interns (part of the run); words/progress are not persisted
+	Interns          []Intern
+	InternSpeedLevel int    // "internspeed" upgrade level
+	ShopQuipText     string // HR quip shown in the shop after hiring
+	lastHired        int    // previous hiring quip, to never repeat
+
+	// office events; only EventsToday persists — active timers reset on
+	// load, like the word itself
+	FrenzyTimer     float64 // >0: everything pays ×FrenzyMult
+	InspectionArmed bool    // inspection waiting for the next word boundary
+	InspectionTimer float64 // >0: the current word is urgent
+	EventsToday     int
+	EventToast      string  // announce line, visible for the whole event
+	eventClock      float64 // active seconds since the last event roll
+	eventSpacing    float64 // active seconds since the last event
+	lastCoffeeQuip  int
+	lastInspectQuip int
 
 	// day cycle (part of the run)
 	Day      int     // current day, 1-based
 	DayTimer float64 // active-play seconds left in the day
+	dayQuota int     // quota locked at day start; upgrades hit the NEXT day
 
 	// current-day stats (part of the run)
 	DayWords      int            // words completed today
 	DayFails      int            // mistakes today
+	DayBestStreak int            // longest streak today
 	dayFailCounts map[string]int // per-word mistakes today
 
 	// stats of the last settled day, for the summary and morning quips
-	LastDayWords  int
-	LastDayFails  int
-	LastDayWorst  string // most-failed word ("" if no fails)
-	LastDayWorstN int
+	LastDayWords      int
+	LastDayFails      int
+	LastDayWorst      string // most-failed word ("" if no fails)
+	LastDayWorstN     int
+	LastDayBestStreak int
 
 	// global stats, kept across runs
 	TotalWords int
 	TotalFails int
+	BestStreak int            // longest streak ever
+	BestDay    int            // highest day ever reached
 	FailCounts map[string]int // per-word mistakes, all-time
 
 	// meta currency, kept across runs
-	HRPoints     int
-	HRMultLevel  int // "hrmult": +10% gain per level, permanent
-	HRDayLevel   int // "hrday": +15s day length per level
-	HRQuotaLevel int // "hrquota": −10% quota per level, capped
+	HRPoints      int
+	HRMultLevel   int // "hrmult": +10% gain per level, permanent
+	HRDayLevel    int // "hrday": +15s day length per level
+	HRQuotaLevel  int // "hrquota": −10% quota per level, capped
+	HRInternLevel int // "hrintern": +1 intern per run per level, capped
+	HREndLevel    int // "hrend": unlocks the /terminar command (0 or 1)
 
 	// end-of-day summary state
-	DayEndFired  bool    // this summary is a firing, not a payday
-	DayEndFirst  bool    // this payday closed day 1: HR points get explained
-	DayEndQuota  int     // quota HR charged (or demanded) this day
-	DayEndGainHR int     // HR points earned (0 when fired)
-	DayEndQuip   int     // picked quip index
-	DayEndLine   int     // current line of a multi-line summary script
-	QuipShown    float64 // typewriter progress of the quip, in runes
-	lastPayday   int     // previous payday quip, to never repeat
-	lastFired    int     // previous firing quip, to never repeat
+	DayEndFired   bool    // this summary is a firing, not a payday
+	DayEndFirst   bool    // first payroll (day HRPayCycle): HR points get explained
+	DayEndQuota   int     // quota HR charged (or demanded) this day
+	DayEndGainHR  int     // HR points earned (0 off payroll days or when fired)
+	DayEndNextPay int     // next payroll day (0 when this day paid out)
+	DayEndQuip    int     // picked quip index
+	DayEndLine    int     // current line of a multi-line summary script
+	QuipShown     float64 // typewriter progress of the quip, in runes
+	lastPayday    int     // previous payday quip, to never repeat
+	lastFired     int     // previous firing quip, to never repeat
 
 	// day-start morning quip state
 	DayStartText   string // composed quip (may embed yesterday's stats)
 	lastStartPlain int    // previous plain morning quip
 	lastStartStat  int    // previous stat-based morning quip
 
-	HRIndex int   // selected meta-shop entry
-	hrFrom  Scene // scene to return to when leaving the meta shop
+	HRIndex    int    // selected meta-shop entry
+	hrFrom     Scene  // scene to return to when leaving the meta shop
+	HRQuipText string // HR quip shown in the meta shop after a purchase
+
+	lastBought map[string]int // previous purchase quip per upgrade, to never repeat
+	resetArmed bool           // RESET selected once, waiting for the confirm Enter
 
 	// command mode ("/..." pauses play)
 	CommandMode bool
@@ -224,11 +336,18 @@ func (g *Game) MenuItems() []MenuItem {
 	if g.OptionsEnabled {
 		items = append(items, MenuItem{ID: "options", Label: ui.MenuOptions})
 	}
+	resetLabel := ui.MenuReset
+	if g.resetArmed {
+		resetLabel = ui.ResetConfirm
+	}
+	items = append(items, MenuItem{ID: "reset", Label: resetLabel})
 	return append(items, MenuItem{ID: "quit", Label: ui.MenuQuit})
 }
 
-// MenuMove moves the menu selection by delta, wrapping around.
+// MenuMove moves the menu selection by delta, wrapping around. Moving
+// away from an armed RESET disarms it.
 func (g *Game) MenuMove(delta int) {
+	g.resetArmed = false
 	n := len(g.MenuItems())
 	g.MenuIndex = ((g.MenuIndex+delta)%n + n) % n
 }
@@ -249,9 +368,14 @@ func (g *Game) MenuAdjust(delta int) {
 	}
 }
 
-// MenuSelect activates the highlighted menu entry.
+// MenuSelect activates the highlighted menu entry. RESET needs a second
+// Enter to confirm; selecting anything else disarms it.
 func (g *Game) MenuSelect() {
-	switch g.menuItem().ID {
+	id := g.menuItem().ID
+	if id != "reset" {
+		g.resetArmed = false
+	}
+	switch id {
 	case "continue":
 		g.continueRun()
 	case "new":
@@ -270,10 +394,38 @@ func (g *Game) MenuSelect() {
 	case "options":
 		g.OptIndex = 0
 		g.Scene = SceneOptions
+	case "reset":
+		if !g.resetArmed {
+			g.resetArmed = true
+			return
+		}
+		g.resetArmed = false
+		g.resetSave()
 	case "quit":
 		g.QuitRequested = true
 		g.Save()
 	}
+}
+
+// resetSave wipes every bit of progress — run, HR points and levels,
+// global stats — and overwrites the save file. Settings (language, volume,
+// display) survive.
+func (g *Game) resetSave() {
+	g.RunActive = false
+	g.savedRun = nil
+	g.HRPoints = 0
+	g.HRMultLevel = 0
+	g.HRDayLevel = 0
+	g.HRQuotaLevel = 0
+	g.HRInternLevel = 0
+	g.HREndLevel = 0
+	g.TotalWords = 0
+	g.TotalFails = 0
+	g.BestStreak = 0
+	g.BestDay = 0
+	g.FailCounts = map[string]int{}
+	g.MenuIndex = 0
+	g.Save()
 }
 
 // continueRun resumes the in-memory run (or restores the one from disk)
@@ -284,11 +436,22 @@ func (g *Game) continueRun() {
 		g.Score = g.savedRun.Score
 		g.MultLevel = g.savedRun.MultLevel
 		g.StreakCapLevel = g.savedRun.StreakCapLevel
+		g.GoldenLevel = g.savedRun.GoldenLevel
+		g.InternSpeedLevel = g.savedRun.InternSpeedLevel
+		// intern words/progress aren't persisted: rebuild them fresh, like
+		// the player word
+		g.Interns = nil
+		for range g.savedRun.InternCount {
+			g.Interns = append(g.Interns, Intern{Word: g.pickWord("")})
+		}
+		g.EventsToday = g.savedRun.EventsToday
 		g.Streak = g.savedRun.Streak
 		g.Day = g.savedRun.Day
 		g.DayTimer = g.savedRun.DayTimer
+		g.dayQuota = g.savedRun.DayQuota
 		g.DayWords = g.savedRun.DayWords
 		g.DayFails = g.savedRun.DayFails
+		g.DayBestStreak = g.savedRun.DayBestStreak
 		g.dayFailCounts = g.savedRun.DayFailCounts
 		if g.dayFailCounts == nil {
 			g.dayFailCounts = map[string]int{}
@@ -301,6 +464,11 @@ func (g *Game) continueRun() {
 		if g.DayTimer <= 0 || g.DayTimer > g.DayLength() {
 			g.DayTimer = g.DayLength()
 		}
+		// older saves have no locked quota
+		if g.dayQuota <= 0 {
+			g.dayQuota = g.computeQuota()
+		}
+		g.BestDay = max(g.BestDay, g.Day)
 	}
 	if !g.RunActive {
 		g.initRun()
@@ -336,6 +504,10 @@ func (g *Game) initRun() {
 	g.Streak = 0
 	g.MultLevel = 0
 	g.StreakCapLevel = 0
+	g.GoldenLevel = 0
+	g.Interns = nil
+	g.InternSpeedLevel = 0
+	g.ShopQuipText = ""
 	g.CommandMode = false
 	g.CommandBuf = ""
 	g.CommandErr = 0
@@ -344,7 +516,10 @@ func (g *Game) initRun() {
 	g.nextWord()
 	g.Day = 1
 	g.DayTimer = g.DayLength()
+	g.dayQuota = g.computeQuota()
+	g.BestDay = max(g.BestDay, g.Day)
 	g.resetDayStats()
+	g.clearEvents()
 	g.RunActive = true
 }
 
@@ -352,6 +527,7 @@ func (g *Game) initRun() {
 func (g *Game) resetDayStats() {
 	g.DayWords = 0
 	g.DayFails = 0
+	g.DayBestStreak = 0
 	g.dayFailCounts = map[string]int{}
 }
 
@@ -482,9 +658,173 @@ func (g *Game) ComboMult() float64 {
 }
 
 // WordGain is what completing the current word pays right now:
-// len × (1 + mult level) × combo multiplier × HR bonus, rounded.
+// len × (1 + mult level) × combo multiplier × HR bonus, times the golden,
+// frenzy and inspection multipliers when they apply, rounded.
 func (g *Game) WordGain() int {
-	return int(math.Round(float64(len(g.Word)) * float64(1+g.MultLevel) * g.ComboMult() * g.HRMult()))
+	gain := float64(len(g.Word)) * float64(1+g.MultLevel) * g.ComboMult() * g.HRMult()
+	if g.WordGolden {
+		gain *= g.GoldenMult()
+	}
+	if g.FrenzyActive() {
+		gain *= FrenzyMult
+	}
+	if g.InspectionActive() {
+		gain *= InspectionRewardMult
+	}
+	return int(math.Round(gain))
+}
+
+// GoldenChance is the probability of the next player word being golden.
+func (g *Game) GoldenChance() float64 {
+	return GoldenBaseChance + GoldenChancePerLevel*float64(g.GoldenLevel)
+}
+
+// GoldenMult is what a golden word multiplies its gain by.
+func (g *Game) GoldenMult() float64 {
+	return GoldenBaseMult + GoldenMultPerLevel*float64(g.GoldenLevel)
+}
+
+// rollGolden decides whether a freshly picked word comes out golden.
+func (g *Game) rollGolden() bool {
+	return rand.Float64() < g.GoldenChance()
+}
+
+// tickEvents advances the event timers and rolls for a new event every
+// EventCheckInterval. It runs exactly when the day clock runs, so paused
+// scenes freeze events too.
+func (g *Game) tickEvents(dt float64) {
+	g.FrenzyTimer = math.Max(0, g.FrenzyTimer-dt)
+	g.InspectionTimer = math.Max(0, g.InspectionTimer-dt)
+	g.eventSpacing += dt
+	g.eventClock += dt
+	for g.eventClock >= EventCheckInterval {
+		g.eventClock -= EventCheckInterval
+		g.maybeTriggerEvent()
+	}
+}
+
+// maybeTriggerEvent rolls for a new event, skipping when the daily cap is
+// hit, the last event is too recent, or one is still active.
+func (g *Game) maybeTriggerEvent() {
+	if g.EventsToday >= EventMaxPerDay || g.eventSpacing < EventMinSpacing {
+		return
+	}
+	if g.FrenzyActive() || g.InspectionArmed || g.InspectionActive() {
+		return
+	}
+	if rand.Float64() >= EventChance {
+		return
+	}
+	if rand.IntN(2) == 0 {
+		g.startFrenzy()
+	} else {
+		g.armInspection()
+	}
+}
+
+// startFrenzy begins a coffee frenzy: everything pays ×FrenzyMult while
+// the timer runs.
+func (g *Game) startFrenzy() {
+	g.FrenzyTimer = FrenzyDuration
+	g.EventsToday++
+	g.eventSpacing = 0
+	code := Languages[g.LangIndex].Code
+	g.EventToast = EventCoffeeScripts[code][pickQuip(len(EventCoffeeScripts[code]), &g.lastCoffeeQuip)]
+}
+
+// armInspection queues an HR inspection: the NEXT word becomes urgent (a
+// word in progress is never interrupted).
+func (g *Game) armInspection() {
+	g.InspectionArmed = true
+	g.EventsToday++
+	g.eventSpacing = 0
+	code := Languages[g.LangIndex].Code
+	g.EventToast = EventInspectionScripts[code][pickQuip(len(EventInspectionScripts[code]), &g.lastInspectQuip)]
+}
+
+// clearEvents drops all event state; a new day starts calm.
+func (g *Game) clearEvents() {
+	g.FrenzyTimer = 0
+	g.InspectionArmed = false
+	g.InspectionTimer = 0
+	g.EventToast = ""
+	g.eventClock = 0
+	g.eventSpacing = 0
+	g.EventsToday = 0
+}
+
+// FrenzyActive reports whether a coffee frenzy is running.
+func (g *Game) FrenzyActive() bool { return g.FrenzyTimer > 0 }
+
+// FrenzyLeft is the frenzy's remaining seconds.
+func (g *Game) FrenzyLeft() float64 { return g.FrenzyTimer }
+
+// InspectionActive reports whether the current word is urgent.
+func (g *Game) InspectionActive() bool { return g.InspectionTimer > 0 }
+
+// InspectionLeft is the urgent word's remaining seconds.
+func (g *Game) InspectionLeft() float64 { return g.InspectionTimer }
+
+// EventToastVisible reports whether the event announce line should show:
+// for the whole life of the event, not on a timer.
+func (g *Game) EventToastVisible() bool {
+	return g.FrenzyActive() || g.InspectionArmed || g.InspectionActive()
+}
+
+// MaxInterns is how many interns a run may hire, raised by "hrintern".
+func (g *Game) MaxInterns() int {
+	return 1 + g.HRInternLevel
+}
+
+// InternCPS is how many letters per second each intern types.
+func (g *Game) InternCPS() float64 {
+	return InternBaseCPS + InternCPSPerLevel*float64(g.InternSpeedLevel)
+}
+
+// InternGain is what an intern banks for completing word: like WordGain
+// but without the combo and golden bonuses — those stay player-skill. A
+// coffee frenzy is company-wide, so it doubles interns too.
+func (g *Game) InternGain(word string) int {
+	gain := float64(len(word)) * float64(1+g.MultLevel) * g.HRMult()
+	if g.FrenzyActive() {
+		gain *= FrenzyMult
+	}
+	return int(math.Round(gain))
+}
+
+// tickInterns advances every intern's typing. It runs exactly when the day
+// clock runs, so pausing the day (command mode, shop, menus) freezes the
+// interns too — idling in a paused scene must never print free money.
+func (g *Game) tickInterns(dt float64) {
+	for i := range g.Interns {
+		in := &g.Interns[i]
+		in.GainTimer = math.Max(0, in.GainTimer-dt)
+		left := dt
+		if in.rest > 0 {
+			if in.rest >= left {
+				in.rest -= left
+				continue
+			}
+			left -= in.rest
+			in.rest = 0
+		}
+		in.acc += left * g.InternCPS()
+		for in.acc >= 1 && in.rest == 0 {
+			in.acc--
+			in.Pos++
+			if in.Pos >= len(in.Word) {
+				in.LastGain = g.InternGain(in.Word)
+				in.GainTimer = InternGainFlash
+				g.Score += in.LastGain
+				g.DayWords++
+				g.TotalWords++
+				in.Word = g.pickWord(in.Word)
+				in.Pos = 0
+				in.rest = InternWordRest
+				in.acc = 0
+			}
+		}
+	}
 }
 
 // HRMult is the permanent gain bonus from the "hrmult" meta upgrade.
@@ -497,12 +837,22 @@ func (g *Game) DayLength() float64 {
 	return DayBaseTime + DayTimeBonus*float64(g.HRDayLevel)
 }
 
-// DayQuota is what HR charges at the end of the current day: exponential
-// in the day number, scaled up by owned run upgrades and trimmed by the
-// "hrquota" meta upgrade.
+// DayQuota is what HR charges at the end of the current day. It's locked
+// at day start (see computeQuota): buying upgrades mid-day only inflates
+// the next day's quota.
 func (g *Game) DayQuota() int {
+	return g.dayQuota
+}
+
+// computeQuota evaluates the quota formula for the current day and levels:
+// exponential in the day number, scaled up by owned run upgrades and
+// trimmed by the "hrquota" meta upgrade. Called only at day boundaries.
+func (g *Game) computeQuota() int {
 	quota := float64(QuotaBase) * math.Pow(QuotaGrowth, float64(g.Day-1))
-	quota *= 1 + 0.25*float64(g.MultLevel) + 0.10*float64(g.StreakCapLevel)
+	quota *= 1 + QuotaMultTerm*float64(g.MultLevel) + QuotaStreakTerm*float64(g.StreakCapLevel) +
+		QuotaGoldenTerm*float64(g.GoldenLevel) +
+		QuotaInternTerm*float64(len(g.Interns)) +
+		QuotaInternSpeedTerm*float64(g.InternSpeedLevel)
 	quota *= 1 - 0.10*float64(g.HRQuotaLevel)
 	return int(math.Round(quota))
 }
@@ -550,10 +900,13 @@ func (g *Game) TypeChar(r rune) {
 		g.Pos++
 		if g.Pos == len(g.Word) {
 			g.Streak++
+			g.DayBestStreak = max(g.DayBestStreak, g.Streak)
+			g.BestStreak = max(g.BestStreak, g.Streak)
 			g.LastGain = g.WordGain()
 			g.Score += g.LastGain
 			g.DayWords++
 			g.TotalWords++
+			g.InspectionTimer = 0 // urgent word delivered: bonus banked above
 			g.Phase = PhaseSuccess
 			g.PhaseTimer = SuccessTime
 		}
@@ -584,9 +937,11 @@ func (g *Game) Tick(dt float64) {
 		}
 	case ScenePlay:
 		if g.CommandMode {
-			return // command mode pauses phases and the day clock
+			return // command mode pauses phases, interns, events and the day clock
 		}
 		g.DayTimer -= dt
+		g.tickEvents(dt)
+		g.tickInterns(dt)
 		if g.Phase != PhaseTyping {
 			g.PhaseTimer -= dt
 			if g.PhaseTimer <= 0 {
@@ -650,20 +1005,46 @@ func (g *Game) CommandSubmit() {
 	case "/menu":
 		g.Scene = SceneMenu
 		g.Save()
+	case "/terminar", "/endday":
+		if g.HREndLevel > 0 {
+			g.endDay() // settles the quota now: short score means fired
+		} else {
+			g.CommandErr = CommandErrTime
+		}
 	default:
 		g.CommandErr = CommandErrTime
 	}
 }
 
+// ShopItems is what the shop actually lists: every upgrade, except that
+// the intern speed entry stays hidden until an intern exists.
+func (g *Game) ShopItems() []Upgrade {
+	if len(g.Interns) > 0 {
+		return Upgrades
+	}
+	items := make([]Upgrade, 0, len(Upgrades)-1)
+	for _, up := range Upgrades {
+		if up.ID != "internspeed" {
+			items = append(items, up)
+		}
+	}
+	return items
+}
+
 // ShopMove moves the shop selection by delta, wrapping around.
 func (g *Game) ShopMove(delta int) {
-	n := len(Upgrades)
+	n := len(g.ShopItems())
 	g.ShopIndex = ((g.ShopIndex+delta)%n + n) % n
 }
 
-// ShopBuy purchases the selected upgrade if the score covers its cost.
+// ShopBuy purchases the selected upgrade if the score covers its cost;
+// capped upgrades at their limit can't be bought. Hiring an intern also
+// picks an HR quip for the shop screen.
 func (g *Game) ShopBuy() bool {
-	up := Upgrades[g.ShopIndex]
+	up := g.ShopItems()[g.ShopIndex]
+	if g.UpgradeMaxed(up.ID) {
+		return false
+	}
 	cost := g.UpgradeCost(up.ID)
 	if g.Score < cost {
 		return false
@@ -674,13 +1055,26 @@ func (g *Game) ShopBuy() bool {
 		g.MultLevel++
 	case "streakcap":
 		g.StreakCapLevel++
+	case "golden":
+		g.GoldenLevel++
+	case "intern":
+		g.Interns = append(g.Interns, Intern{Word: g.pickWord("")})
+	case "internspeed":
+		g.InternSpeedLevel++
+	}
+	if up.ID == "intern" {
+		code := Languages[g.LangIndex].Code
+		g.ShopQuipText = InternHiredScripts[code][pickQuip(len(InternHiredScripts[code]), &g.lastHired)]
+	} else {
+		g.ShopQuipText = g.pickBoughtQuip(up.ID)
 	}
 	g.Save()
 	return true
 }
 
-// ExitShop returns from the shop to play.
+// ExitShop returns from the shop to play, dropping any hiring quip.
 func (g *Game) ExitShop() {
+	g.ShopQuipText = ""
 	g.Scene = ScenePlay
 }
 
@@ -696,15 +1090,23 @@ func (g *Game) endDay() {
 	// bank today's stats for the summary and tomorrow's morning quip
 	g.LastDayWords = g.DayWords
 	g.LastDayFails = g.DayFails
+	g.LastDayBestStreak = g.DayBestStreak
 	g.LastDayWorst, g.LastDayWorstN = worstWord(g.dayFailCounts)
+	g.clearEvents()
 
 	if g.Score >= g.DayEndQuota {
 		g.Score -= g.DayEndQuota
-		g.DayEndGainHR = g.Day
-		g.HRPoints += g.Day
-		g.DayEndFirst = g.Day == 1
+		g.DayEndGainHR = hrGainForDay(g.Day)
+		g.HRPoints += g.DayEndGainHR
+		g.DayEndFirst = g.Day == HRPayCycle // first payroll: explain HR points
+		g.DayEndNextPay = 0
+		if g.DayEndGainHR == 0 {
+			g.DayEndNextPay = (g.Day/HRPayCycle + 1) * HRPayCycle
+		}
 		g.Day++
+		g.BestDay = max(g.BestDay, g.Day)
 		g.DayTimer = g.DayLength()
+		g.dayQuota = g.computeQuota() // lock tomorrow's quota with today's upgrades
 		g.resetDayStats()
 		g.DayEndFired = false
 		g.DayEndQuip = pickQuip(len(PaydayScripts[code]), &g.lastPayday)
@@ -712,6 +1114,7 @@ func (g *Game) endDay() {
 		g.DayEndFired = true
 		g.DayEndFirst = false
 		g.DayEndGainHR = 0
+		g.DayEndNextPay = 0
 		g.DayEndQuip = pickQuip(len(FiredScripts[code]), &g.lastFired)
 		g.RunActive = false
 		g.savedRun = nil
@@ -872,7 +1275,7 @@ func (g *Game) HRMove(delta int) {
 // upgrades at their limit can't be bought.
 func (g *Game) HRBuy() bool {
 	up := HRUpgrades[g.HRIndex]
-	if up.ID == "hrquota" && g.HRQuotaLevel >= HRQuotaMax {
+	if g.HRUpgradeMaxed(up.ID) {
 		return false
 	}
 	cost := g.HRUpgradeCost(up.ID)
@@ -887,13 +1290,37 @@ func (g *Game) HRBuy() bool {
 		g.HRDayLevel++
 	case "hrquota":
 		g.HRQuotaLevel++
+	case "hrintern":
+		g.HRInternLevel++
+	case "hrend":
+		g.HREndLevel++
 	}
+	g.HRQuipText = g.pickBoughtQuip(up.ID)
 	g.Save()
 	return true
 }
 
-// ExitHR leaves the meta shop, back to wherever it was opened from.
+// pickBoughtQuip returns an HR quip for buying the given upgrade, never
+// repeating the previous pick for that same upgrade.
+func (g *Game) pickBoughtQuip(id string) string {
+	code := Languages[g.LangIndex].Code
+	pool := UpgradeBoughtScripts[id][code]
+	if len(pool) == 0 {
+		return ""
+	}
+	if g.lastBought == nil {
+		g.lastBought = map[string]int{}
+	}
+	last := g.lastBought[id]
+	quip := pool[pickQuip(len(pool), &last)]
+	g.lastBought[id] = last
+	return quip
+}
+
+// ExitHR leaves the meta shop, back to wherever it was opened from,
+// dropping any purchase quip.
 func (g *Game) ExitHR() {
+	g.HRQuipText = ""
 	g.Scene = g.hrFrom
 }
 
@@ -906,6 +1333,10 @@ func (g *Game) HRUpgradeLevel(id string) int {
 		return g.HRDayLevel
 	case "hrquota":
 		return g.HRQuotaLevel
+	case "hrintern":
+		return g.HRInternLevel
+	case "hrend":
+		return g.HREndLevel
 	}
 	return 0
 }
@@ -926,7 +1357,15 @@ func (g *Game) HRUpgradeCost(id string) int {
 
 // HRUpgradeMaxed reports whether a meta upgrade hit its level cap.
 func (g *Game) HRUpgradeMaxed(id string) bool {
-	return id == "hrquota" && g.HRQuotaLevel >= HRQuotaMax
+	switch id {
+	case "hrquota":
+		return g.HRQuotaLevel >= HRQuotaMax
+	case "hrintern":
+		return g.HRInternLevel >= HRInternMax
+	case "hrend":
+		return g.HREndLevel >= 1
+	}
+	return false
 }
 
 // HRUpgradeEffect describes what buying the next meta level changes.
@@ -943,6 +1382,16 @@ func (g *Game) HRUpgradeEffect(id string) string {
 			return fmt.Sprintf("-%d%%", 10*g.HRQuotaLevel)
 		}
 		return fmt.Sprintf("-%d%% → -%d%%", 10*g.HRQuotaLevel, 10*(g.HRQuotaLevel+1))
+	case "hrintern":
+		if g.HRInternLevel >= HRInternMax {
+			return fmt.Sprintf("%d", g.MaxInterns())
+		}
+		return fmt.Sprintf("%d → %d", g.MaxInterns(), g.MaxInterns()+1)
+	case "hrend":
+		if Languages[g.LangIndex].Code == "es" {
+			return "/terminar"
+		}
+		return "/endday"
 	}
 	return ""
 }
@@ -954,8 +1403,25 @@ func (g *Game) UpgradeLevel(id string) int {
 		return g.MultLevel
 	case "streakcap":
 		return g.StreakCapLevel
+	case "golden":
+		return g.GoldenLevel
+	case "intern":
+		return len(g.Interns)
+	case "internspeed":
+		return g.InternSpeedLevel
 	}
 	return 0
+}
+
+// UpgradeMaxed reports whether a shop upgrade hit its level cap.
+func (g *Game) UpgradeMaxed(id string) bool {
+	switch id {
+	case "golden":
+		return g.GoldenLevel >= GoldenMaxLevel
+	case "intern":
+		return len(g.Interns) >= g.MaxInterns()
+	}
+	return false
 }
 
 // UpgradeCost is the price of the next level: BaseCost × 3^level.
@@ -980,6 +1446,21 @@ func (g *Game) UpgradeEffect(id string) string {
 		return fmt.Sprintf("x%d → x%d", 1+g.MultLevel, 2+g.MultLevel)
 	case "streakcap":
 		return fmt.Sprintf("%d → %d", g.StreakCap(), g.StreakCap()+BaseStreakCap)
+	case "golden":
+		if g.GoldenLevel >= GoldenMaxLevel {
+			return fmt.Sprintf("%.0f%% x%.1f", 100*g.GoldenChance(), g.GoldenMult())
+		}
+		return fmt.Sprintf("%.0f%% x%.1f → %.0f%% x%.1f",
+			100*g.GoldenChance(), g.GoldenMult(),
+			100*(g.GoldenChance()+GoldenChancePerLevel), g.GoldenMult()+GoldenMultPerLevel)
+	case "intern":
+		if len(g.Interns) >= g.MaxInterns() {
+			return fmt.Sprintf("%d/%d", len(g.Interns), g.MaxInterns())
+		}
+		return fmt.Sprintf("%d/%d → %d/%d",
+			len(g.Interns), g.MaxInterns(), len(g.Interns)+1, g.MaxInterns())
+	case "internspeed":
+		return fmt.Sprintf("%.1f → %.1f l/s", g.InternCPS(), g.InternCPS()+InternCPSPerLevel)
 	}
 	return ""
 }
@@ -990,12 +1471,28 @@ func (g *Game) ErrorFlashing() bool {
 	return g.Phase == PhaseError && g.PhaseTimer > ErrorBlockTime
 }
 
-// nextWord picks a random word, avoiding an immediate repeat.
+// nextWord picks a random word for the player, avoiding an immediate
+// repeat, and rolls whether it comes out golden. An armed inspection
+// claims the word here — at the word boundary — making it urgent instead
+// of golden.
 func (g *Game) nextWord() {
+	g.Word = g.pickWord(g.Word)
+	g.Pos = 0
+	if g.InspectionArmed {
+		g.InspectionArmed = false
+		g.InspectionTimer = InspectionTime
+		g.WordGolden = false
+		return
+	}
+	g.WordGolden = g.rollGolden()
+}
+
+// pickWord returns a random word from the active list, avoiding an
+// immediate repeat of avoid.
+func (g *Game) pickWord(avoid string) string {
 	next := g.Words[rand.IntN(len(g.Words))]
-	for next == g.Word && len(g.Words) > 1 {
+	for next == avoid && len(g.Words) > 1 {
 		next = g.Words[rand.IntN(len(g.Words))]
 	}
-	g.Word = next
-	g.Pos = 0
+	return next
 }

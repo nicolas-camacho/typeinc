@@ -130,6 +130,9 @@ $env:CGO_ENABLED='0'; go build ./...
 
 ## Release
 
+Before tagging: move the `Unreleased` entries in `CHANGELOG.md` into a new
+version section.
+
 ```powershell
 git tag v0.X.Y
 git push origin v0.X.Y

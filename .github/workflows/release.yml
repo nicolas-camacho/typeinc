@@ -38,8 +38,18 @@ jobs:
       - name: Package
         run: zip "TYPE.Inc-${GITHUB_REF_NAME}-windows-amd64.zip" "TYPE.Inc.exe"
 
+      - name: Extract changelog section
+        run: |
+          awk -v ver="${GITHUB_REF_NAME#v}" \
+            '$0 ~ "^## \\["ver"\\]" {f=1; next} /^## \[/ {f=0} f' \
+            CHANGELOG.md > release_body.md
+          if [ ! -s release_body.md ]; then
+            echo "No CHANGELOG.md section for ${GITHUB_REF_NAME#v}." > release_body.md
+          fi
+
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
           files: TYPE.Inc-*-windows-amd64.zip
+          body_path: release_body.md
           generate_release_notes: true

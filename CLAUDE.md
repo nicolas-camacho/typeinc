@@ -22,6 +22,11 @@ two frontends: `cmd/typeinc` (raylib desktop) and `cmd/typeinc-tui`
   script table must keep identical line counts in "es" and "en".
 - The color palette is settled — change a color only if Nicolas asks.
 
+## Changelog
+- Every user-visible change adds an entry under `[Unreleased]` in
+  CHANGELOG.md (Keep a Changelog, English). Tagging a release cuts that
+  section into the new version.
+
 ## Running
 - TUI is interactive: never launch it, Nicolas tests it himself.
 - Desktop run: $env:CGO_ENABLED='0'; go run ./cmd/typeinc

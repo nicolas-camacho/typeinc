@@ -521,14 +521,15 @@ func TestTerminalCommandGatedByStage(t *testing.T) {
 	if g.Scene != ScenePlay || g.CommandErr <= 0 {
 		t.Fatal("/terminal answered before the story woke up")
 	}
+	// awake story is enough — no clue needed (the reveal quip and the
+	// command unlock together)
 	g.StoryStage = 1
-	g.storyClues["cw_help"] = true
 	g.CommandErr = 0
 	g.TypeChar('/')
 	typeWord(g, "terminal")
 	g.CommandSubmit()
 	if g.Scene != SceneTerminal {
-		t.Fatalf("Scene = %v after /terminal with a clue, want SceneTerminal", g.Scene)
+		t.Fatalf("Scene = %v after /terminal at stage 1 with no clues, want SceneTerminal", g.Scene)
 	}
 	if len(g.TermLog) == 0 {
 		t.Fatal("terminal opened without its banner")
@@ -557,6 +558,43 @@ func TestTerminalKeyUnlocksDocAndAdvances(t *testing.T) {
 	joined := strings.Join(g.TermLog, "\n")
 	if !strings.Contains(joined, docByID(t, "expediente").Title["es"]) {
 		t.Fatal("unlocking a doc did not print it")
+	}
+}
+
+func TestTerminalKeyReprintsUnlockedDoc(t *testing.T) {
+	g := storyPlay(t, "casa", 1)
+	g.Scene = SceneTerminal
+	g.TermBuf = "vera"
+	g.TermSubmit()
+	if !g.DocUnlocked("expediente") {
+		t.Fatal("first key use did not unlock the doc")
+	}
+	mark := len(g.TermLog)
+	g.TermBuf = "vera"
+	g.TermSubmit()
+	rest := strings.Join(g.TermLog[mark:], "\n")
+	if !strings.Contains(rest, docByID(t, "expediente").Title["es"]) {
+		t.Fatal("re-typing a used key did not reprint its document")
+	}
+}
+
+func TestDayEndSkipJumpsToSummary(t *testing.T) {
+	g := startPlay(t, "casa")
+	g.Day = 3 // first payroll: multi-line HR explanation
+	g.Score = 999999
+	g.DayTimer = 0.001
+	g.Tick(0.01)
+	if !g.DayEndFirst || g.DayEndSummary() {
+		t.Fatalf("DayEndFirst = %v, summary = %v at day-3 close, want true, false",
+			g.DayEndFirst, g.DayEndSummary())
+	}
+	g.DayEndSkip()
+	if !g.DayEndSummary() {
+		t.Fatal("DayEndSkip did not reveal the summary")
+	}
+	g.DayEndEnter() // Enter after the skip moves on to the morning
+	if g.Scene != SceneDayStart {
+		t.Fatalf("Scene = %v after Enter post-skip, want SceneDayStart", g.Scene)
 	}
 }
 
@@ -751,7 +789,6 @@ func TestTerminalMenuEntryGated(t *testing.T) {
 		}
 	}
 	g.StoryStage = 1
-	g.storyClues["cw_help"] = true
 	idx := -1
 	for i, it := range g.MenuItems() {
 		if it.ID == "terminal" {
@@ -773,7 +810,6 @@ func TestTerminalMenuEntryGated(t *testing.T) {
 
 	// entered from play, it returns to play
 	g2 := storyPlay(t, "casa", 1)
-	g2.storyClues["cw_help"] = true
 	g2.TypeChar('/')
 	typeWord(g2, "terminal")
 	g2.CommandSubmit()

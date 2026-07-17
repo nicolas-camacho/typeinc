@@ -1315,6 +1315,14 @@ func (g *Game) DayEndSummary() bool {
 	return g.DayEndQuipDone() && g.DayEndLine == len(g.dayEndLines())-1
 }
 
+// DayEndSkip jumps to the summary's last line fully revealed — numbers on
+// screen at once. The first-payroll HR explanation is the long one; ESC
+// skips it like the intro.
+func (g *Game) DayEndSkip() {
+	g.DayEndLine = len(g.dayEndLines()) - 1
+	g.QuipShown = float64(len(g.dayEndQuip()))
+}
+
 // DayEndEnter advances the end-of-day summary: it completes a
 // half-revealed line, then moves to the next one; after the last, a paid
 // day moves on to the morning quip, a firing goes back to the main menu.

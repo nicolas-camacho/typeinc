@@ -129,8 +129,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.g.ShopBuy()
 			}
 		case game.SceneDayEnd:
-			if msg.String() == "enter" {
+			switch msg.String() {
+			case "enter":
 				m.g.DayEndEnter()
+			case "esc":
+				m.g.DayEndSkip()
 			}
 		case game.SceneHR:
 			switch msg.String() {

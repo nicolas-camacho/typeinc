@@ -502,9 +502,10 @@ func (g *Game) EnterTerminal() {
 	g.Scene = SceneTerminal
 }
 
-// TerminalAvailable reports whether /terminal answers at all.
+// TerminalAvailable reports whether /terminal answers at all: as soon as
+// the story is awake — the reveal quip and the command unlock together.
 func (g *Game) TerminalAvailable() bool {
-	return g.StoryActive() && len(g.storyClues) > 0
+	return g.StoryActive()
 }
 
 // TermTypeChar appends one character to the terminal prompt.
@@ -616,15 +617,16 @@ func (g *Game) termReadDoc(id string) {
 }
 
 // termTryKey matches a loose token against the keys of stage-visible
-// locked docs; a hit unlocks the doc (and may advance the act).
+// docs; a hit unlocks the doc (and may advance the act) and always prints
+// it — re-typing a used key re-reads its document.
 func (g *Game) termTryKey(token string) bool {
 	ui := g.UI()
 	code := Languages[g.LangIndex].Code
 	for _, d := range StoryDocs {
-		if d.Key == "" || d.Key != token || d.Act > g.StoryStage || g.storyDocs[d.ID] {
+		if d.Key == "" || d.Key != token || d.Act > g.StoryStage {
 			continue
 		}
-		g.unlockDoc(d.ID)
+		g.unlockDoc(d.ID) // no-op when already unlocked
 		g.termPrint(ui.TermKeyAccepted)
 		g.termPrint("── " + d.Title[code] + " ──")
 		for _, l := range d.Body[code] {

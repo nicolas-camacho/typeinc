@@ -7,6 +7,18 @@ them into a new section when tagging.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-07-17
+
+### Added
+- ESC skips the end-of-day summary text (including the long first-payroll
+  HR explanation), revealing the numbers at once.
+
+### Fixed
+- The terminal unlocks as soon as its reveal quip can appear — no longer
+  requires holding a clue first.
+- Re-typing an already-used key in the terminal re-reads its document
+  instead of answering "not recognized".
+
 ## [0.3.0] - 2026-07-17
 
 ### Added
@@ -61,7 +73,8 @@ them into a new section when tagging.
 - Two frontends over one headless core: raylib desktop and Bubble Tea TUI.
 - Windows release workflow (tag-triggered, `TYPE.Inc.exe`).
 
-[Unreleased]: https://github.com/nicolas-camacho/typeinc/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/nicolas-camacho/typeinc/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/nicolas-camacho/typeinc/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/nicolas-camacho/typeinc/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/nicolas-camacho/typeinc/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/nicolas-camacho/typeinc/releases/tag/v0.1.0

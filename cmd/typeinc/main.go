@@ -294,6 +294,9 @@ func update(g *game.Game) {
 		if rl.IsKeyPressed(rl.KeyEnter) {
 			g.DayEndEnter()
 		}
+		if rl.IsKeyPressed(rl.KeyEscape) {
+			g.DayEndSkip()
+		}
 		// typewriter key sound, same as the intro
 		cur := len([]rune(g.DayEndQuipVisible()))
 		if cur > prevQuipChars {

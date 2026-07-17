@@ -72,6 +72,8 @@ Both frontends share **one save file** at `%APPDATA%\typeinc\save.json`
 (`os.UserConfigDir`). Run state lives under `Run` and dies with a firing;
 HR points, meta levels and global stats live outside it and persist.
 
+Planned features live in [ROADMAP.md](ROADMAP.md).
+
 ## Working on the code
 
 Conventions the codebase relies on:

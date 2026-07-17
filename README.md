@@ -8,6 +8,7 @@ Still v0.x — mechanics and balance change often.
 
 ## How the game works
 
+- **Intro** — Enter advances the HR welcome story; ESC skips it entirely.
 - **Typing loop** — a word appears; type it letter by letter. A completed
   word pays `len × (1 + mult) × combo × HR bonus`, times the golden, coffee
   and inspection multipliers when they apply. A wrong key resets the word
@@ -38,6 +39,10 @@ Still v0.x — mechanics and balance change often.
   time it pays ×3, expired it just goes back to normal).
 - **Menu extras** — global stats (words, fails, best streak, best day, top
   failed words) and a two-step RESET that wipes all progress.
+- **Something else** — after a few days, the game starts behaving oddly:
+  purple words, glitched messages, a system that should not exist. It is a
+  long background mystery that unlocks over many in-game days. No spoilers
+  here — pay attention to anything violet.
 
 Everything is localized: Spanish and English, switchable from the menu.
 
@@ -46,8 +51,10 @@ Everything is localized: Spanish and English, switchable from the menu.
 ```
 internal/game/        shared core — ALL game logic, zero render deps
 ├── game.go           state machine (Scene/Phase), Tick(dt), balance constants
-├── save.go           JSON save/load, versioned, additive back-compat
+├── save.go           JSON save/load, GameVersion-gated (old saves reset)
 ├── strings.go        every player-facing string + HR quip pools (es/en)
+├── story.go          background-mystery engine (acts, triggers, terminal)
+├── storystrings.go   story content: quips, documents, keys (es/en)
 └── words.go          embedded dictionaries (a-z words, 3-14 letters)
 
 cmd/typeinc/          desktop frontend — raylib via purego (no cgo)
@@ -83,8 +90,15 @@ Conventions the codebase relies on:
   BOTH frontends (`update`/`drawX` in the desktop, `Update`/`viewX` in the
   TUI). Shop and HR office render generically from the upgrade slices —
   new upgrades usually need zero frontend work.
-- **Save changes are additive**: new fields with zero-value defaults, keep
-  Version 2, guard on `Load`. Old saves must keep loading.
+- **Save changes are additive** within a save generation: new fields with
+  zero-value defaults, guard on `Load`. `SaveVersion` (a dotted game
+  version) gates the whole file — loading an older or versionless save
+  keeps only the settings. Bump it ONLY when a release must invalidate old
+  saves on purpose.
+- **Story content** lives in `storystrings.go` (quips per act, corrupt
+  words, terminal documents). Keys and document IDs are language-neutral
+  lowercase tokens; corrupt-word texts are typeable ASCII (a-z + space).
+  Structural tests enforce all of it.
 - **Every mechanic ships with tests** in `internal/game/game_test.go`.
   Tests force words/state directly to avoid RNG; chance rolls live in tiny
   helpers so effects can be tested deterministically.

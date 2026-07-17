@@ -25,6 +25,7 @@ const (
 	SceneHR       // meta shop, paid with HR points
 	SceneDayStart // HR morning quip before a new day begins
 	SceneStats    // global stats screen, from the main menu
+	SceneTerminal // hidden story terminal, reached via /terminal
 )
 
 // Phase timings, in seconds.
@@ -44,12 +45,12 @@ const BaseStreakCap = 5
 // quota is locked at day start: upgrades bought mid-day only inflate the
 // NEXT day's quota.
 const (
-	DayBaseTime     = 90.0 // seconds per day before upgrades (1.5 min)
+	DayBaseTime     = 60.0 // seconds per day before upgrades (1 min)
 	DayTimeBonus    = 15.0 // extra seconds per "hrday" level
 	QuotaBase       = 100  // day-1 quota before scaling
 	QuotaGrowth     = 1.55 // per-day exponential growth
-	QuotaMultTerm   = 0.35 // quota inflation per "mult" level
-	QuotaStreakTerm = 0.15 // quota inflation per "streakcap" level
+	QuotaMultTerm   = 0.25 // quota inflation per "mult" level
+	QuotaStreakTerm = 0.08 // quota inflation per "streakcap" level
 	HRQuotaMax      = 5    // "hrquota" level cap (−10% each, max −50%)
 )
 
@@ -79,7 +80,7 @@ const (
 	GoldenBaseMult       = 3.0  // golden payout multiplier at level 0
 	GoldenMultPerLevel   = 0.5  // +0.5x payout per level
 	GoldenMaxLevel       = 8    // level cap: 10% chance, ×7 payout
-	QuotaGoldenTerm      = 0.08 // quota inflation per golden level
+	QuotaGoldenTerm      = 0.04 // quota inflation per golden level
 )
 
 // Intern tuning: an intern types its own words in the HUD's left column,
@@ -93,8 +94,8 @@ const (
 	InternWordRest       = 0.5  // pause after an intern finishes a word (HUD readability)
 	InternGainFlash      = 0.8  // seconds the intern "+n" flash stays visible
 	HRInternMax          = 3    // "hrintern" level cap: up to 4 interns per run
-	QuotaInternTerm      = 0.25 // quota inflation per intern owned
-	QuotaInternSpeedTerm = 0.08 // quota inflation per "internspeed" level
+	QuotaInternTerm      = 0.15 // quota inflation per intern owned
+	QuotaInternSpeedTerm = 0.04 // quota inflation per "internspeed" level
 )
 
 // Intern is one hired auto-typer: it types Word letter by letter and banks
@@ -104,6 +105,7 @@ type Intern struct {
 	Pos       int     // letters typed so far
 	LastGain  int     // last payout, for the HUD flash
 	GainTimer float64 // seconds the payout flash stays visible
+	Possessed bool    // typing a story phrase: renders violet, pays nothing
 	acc       float64 // fractional letters accumulated
 	rest      float64 // post-word pause left
 }
@@ -115,9 +117,9 @@ type Intern struct {
 // EventMinSpacing > FrenzyDuration guarantees events never overlap.
 const (
 	EventCheckInterval   = 5.0  // seconds of active play between event rolls
-	EventChance          = 0.10 // trigger chance per roll (~1.8 expected/day)
+	EventChance          = 0.20 // trigger chance per roll (~2.4 expected per 60s day)
 	EventMinSpacing      = 20.0 // min active seconds between events
-	EventMaxPerDay       = 3
+	EventMaxPerDay       = 5
 	FrenzyDuration       = 10.0
 	FrenzyMult           = 2.0 // ×2 on ALL income: player words and interns
 	InspectionTime       = 8.0 // seconds to finish the urgent word
@@ -305,11 +307,57 @@ type Game struct {
 	DisplayMode int     // index into DisplayModeLabels
 	Volume      float64 // master volume 0..1
 	OptIndex    int     // selected options entry
+
+	// background mystery — meta layer, survives firings (like HRPoints)
+	StoryStage   int             // 0 dormant, 1..6 acts, StoryEndAct solved
+	storyClues   map[string]bool // discovered clue IDs
+	storyDocs    map[string]bool // keyed terminal docs unlocked
+	markedCounts map[string]int  // marked-word progress, accumulates across runs
+
+	// background mystery — run layer, reset by initRun
+	WordCorrupt     bool            // current word is corrupt: violet, unpaid, clock frozen
+	CorruptTimer    float64         // seconds before the corrupt word dissolves
+	corruptArmed    bool            // corrupt word waiting for the next word boundary
+	corruptClueID   string          // clue the armed/active corrupt word registers
+	CorruptToday    int             // per-day corrupt cap counter
+	ritualDone      map[string]bool // triggers already fired this run
+	storyDaysNoBeat int             // mornings without a story beat (pity)
+	possessedIdx    int             // intern currently possessed (-1 none)
+	possessedToday  bool
+
+	// background mystery — presentation, not persisted
+	ClockGlitch       float64 // >0: DayClock shows an impossible time
+	clockGlitchClock  float64
+	clockGlitchText   string
+	StoryToast        string  // violet toast (corrupt/marked/possession payoffs)
+	StoryToastTimer   float64 // seconds the story toast stays visible
+	DayStartStory     bool    // this morning's quip is a glitched one
+	DayEndStory       bool    // this evening's quip is a glitched one
+	dayEndStoryIdx    int
+	DayEndCode        string // act-5 code embedded in the day-end summary
+	storyQuipForced   bool   // act just advanced: next morning quip glitches
+	lastWeird         int
+	lastHint          int   // no-repeat cursor for objective-hint quips
+	termFrom          Scene // scene to return to when leaving the terminal
+	termOpened        bool  // meta: terminal entered at least once (persisted)
+	lastCorruptDone   int
+	lastMarkedHit     int
+	lastPossessed     int
+	lastPossessedDone int
+
+	// hidden terminal scene
+	TermBuf string   // prompt buffer
+	TermLog []string // session log, capped
 }
 
 // New returns a game sitting on the main menu.
 func New() *Game {
-	return &Game{Scene: SceneMenu, Volume: 0.4, FailCounts: map[string]int{}}
+	g := &Game{Scene: SceneMenu, Volume: 0.4, FailCounts: map[string]int{}}
+	g.storyClues = map[string]bool{}
+	g.storyDocs = map[string]bool{}
+	g.markedCounts = map[string]int{}
+	g.resetStoryRun()
+	return g
 }
 
 // HasSave reports whether CONTINUAR has something to resume: a run in
@@ -333,6 +381,9 @@ func (g *Game) MenuItems() []MenuItem {
 		MenuItem{ID: "hr", Label: fmt.Sprintf("%s: %d", ui.MenuHR, g.HRPoints)},
 		MenuItem{ID: "stats", Label: ui.MenuStats},
 	)
+	if g.TerminalAvailable() {
+		items = append(items, MenuItem{ID: "terminal", Label: ui.MenuTerminal})
+	}
 	if g.OptionsEnabled {
 		items = append(items, MenuItem{ID: "options", Label: ui.MenuOptions})
 	}
@@ -391,6 +442,8 @@ func (g *Game) MenuSelect() {
 		g.Scene = SceneHR
 	case "stats":
 		g.Scene = SceneStats
+	case "terminal":
+		g.EnterTerminal()
 	case "options":
 		g.OptIndex = 0
 		g.Scene = SceneOptions
@@ -424,6 +477,7 @@ func (g *Game) resetSave() {
 	g.BestStreak = 0
 	g.BestDay = 0
 	g.FailCounts = map[string]int{}
+	g.resetStory()
 	g.MenuIndex = 0
 	g.Save()
 }
@@ -445,6 +499,9 @@ func (g *Game) continueRun() {
 			g.Interns = append(g.Interns, Intern{Word: g.pickWord("")})
 		}
 		g.EventsToday = g.savedRun.EventsToday
+		g.CorruptToday = g.savedRun.CorruptToday
+		g.ritualDone = sliceToBoolSet(g.savedRun.RitualDone)
+		g.storyDaysNoBeat = g.savedRun.StoryDaysNoBeat
 		g.Streak = g.savedRun.Streak
 		g.Day = g.savedRun.Day
 		g.DayTimer = g.savedRun.DayTimer
@@ -512,6 +569,7 @@ func (g *Game) initRun() {
 	g.CommandBuf = ""
 	g.CommandErr = 0
 	g.ShopIndex = 0
+	g.resetStoryRun()
 	g.Word = ""
 	g.nextWord()
 	g.Day = 1
@@ -582,6 +640,21 @@ func (g *Game) IntroEnter() {
 		g.IntroShown = 0
 		return
 	}
+	if g.introReturn {
+		// the run was already restored by continueRun
+		g.introReturn = false
+		g.Scene = ScenePlay
+		return
+	}
+	g.initRun()
+	g.savedRun = nil
+	g.Scene = ScenePlay
+	g.Save()
+}
+
+// IntroSkip jumps past the whole intro straight into play — the full
+// new-game story and the CONTINUAR return quip alike.
+func (g *Game) IntroSkip() {
 	if g.introReturn {
 		// the run was already restored by continueRun
 		g.introReturn = false
@@ -712,6 +785,9 @@ func (g *Game) maybeTriggerEvent() {
 	if g.FrenzyActive() || g.InspectionArmed || g.InspectionActive() {
 		return
 	}
+	if g.corruptArmed || g.WordCorrupt {
+		return // the corrupt signal owns the word slot
+	}
 	if rand.Float64() >= EventChance {
 		return
 	}
@@ -813,15 +889,21 @@ func (g *Game) tickInterns(dt float64) {
 			in.acc--
 			in.Pos++
 			if in.Pos >= len(in.Word) {
-				in.LastGain = g.InternGain(in.Word)
-				in.GainTimer = InternGainFlash
-				g.Score += in.LastGain
-				g.DayWords++
-				g.TotalWords++
+				if in.Possessed {
+					// the phrase pays nothing; the intern snaps out of it
+					g.possessionComplete(in)
+				} else {
+					in.LastGain = g.InternGain(in.Word)
+					in.GainTimer = InternGainFlash
+					g.Score += in.LastGain
+					g.DayWords++
+					g.TotalWords++
+				}
 				in.Word = g.pickWord(in.Word)
 				in.Pos = 0
 				in.rest = InternWordRest
 				in.acc = 0
+				g.maybePossessIntern(i)
 			}
 		}
 	}
@@ -857,8 +939,12 @@ func (g *Game) computeQuota() int {
 	return int(math.Round(quota))
 }
 
-// DayClock renders the remaining day time as M:SS.
+// DayClock renders the remaining day time as M:SS — unless the building
+// briefly shows the local time of somewhere else (act 4+).
 func (g *Game) DayClock() string {
+	if g.ClockGlitch > 0 && g.clockGlitchText != "" {
+		return g.clockGlitchText
+	}
 	t := int(math.Ceil(math.Max(0, g.DayTimer)))
 	return fmt.Sprintf("%d:%02d", t/60, t%60)
 }
@@ -899,6 +985,12 @@ func (g *Game) TypeChar(r rune) {
 	if g.Pos < len(g.Word) && rune(g.Word[g.Pos]) == r {
 		g.Pos++
 		if g.Pos == len(g.Word) {
+			if g.WordCorrupt {
+				// corrupt words pay nothing and touch no stats: the
+				// reward is the clue
+				g.corruptComplete()
+				return
+			}
 			g.Streak++
 			g.DayBestStreak = max(g.DayBestStreak, g.Streak)
 			g.BestStreak = max(g.BestStreak, g.Streak)
@@ -909,17 +1001,28 @@ func (g *Game) TypeChar(r rune) {
 			g.InspectionTimer = 0 // urgent word delivered: bonus banked above
 			g.Phase = PhaseSuccess
 			g.PhaseTimer = SuccessTime
+			g.checkMarkedWord()
+			g.checkStoryTriggers()
+			if g.StoryActive() && g.rollCorrupt() {
+				g.armCorrupt("")
+			}
 		}
 		return
 	}
 	g.Phase = PhaseError
 	g.PhaseTimer = ErrorFlashTime + ErrorBlockTime
 	g.Pos = 0
+	if g.WordCorrupt {
+		// a corrupt word is off the company's books: the streak survives
+		// and "ayudame" must never pollute the fail stats
+		return
+	}
 	g.Streak = 0
 	g.DayFails++
 	g.TotalFails++
 	g.dayFailCounts[g.Word]++
 	g.FailCounts[g.Word]++
+	g.checkStoryTriggers()
 }
 
 // Tick advances time-based state; dt is in seconds. The intro reveals
@@ -930,6 +1033,9 @@ func (g *Game) Tick(dt float64) {
 	if g.CommandErr > 0 {
 		g.CommandErr = max(0, g.CommandErr-dt)
 	}
+	if g.StoryToastTimer > 0 {
+		g.StoryToastTimer = max(0, g.StoryToastTimer-dt)
+	}
 	switch g.Scene {
 	case SceneIntro:
 		if !g.IntroLineDone() {
@@ -939,9 +1045,23 @@ func (g *Game) Tick(dt float64) {
 		if g.CommandMode {
 			return // command mode pauses phases, interns, events and the day clock
 		}
-		g.DayTimer -= dt
-		g.tickEvents(dt)
-		g.tickInterns(dt)
+		if g.WordCorrupt {
+			// a corrupt word freezes the whole office — day clock, events
+			// and interns — so the interruption can never cost or farm
+			// anything; only the signal's own timer runs
+			if g.Phase == PhaseTyping {
+				g.CorruptTimer -= dt
+				if g.CorruptTimer <= 0 {
+					g.WordCorrupt = false
+					g.nextWord()
+				}
+			}
+		} else {
+			g.DayTimer -= dt
+			g.tickEvents(dt)
+			g.tickInterns(dt)
+			g.tickStoryFX(dt)
+		}
 		if g.Phase != PhaseTyping {
 			g.PhaseTimer -= dt
 			if g.PhaseTimer <= 0 {
@@ -954,8 +1074,8 @@ func (g *Game) Tick(dt float64) {
 			}
 		}
 		// only end the day between phases so a word mid-success still
-		// banks its points first
-		if g.DayTimer <= 0 && g.Phase == PhaseTyping {
+		// banks its points first; an active corrupt word plays out first
+		if g.DayTimer <= 0 && g.Phase == PhaseTyping && !g.WordCorrupt {
 			g.endDay()
 		}
 	case SceneDayEnd:
@@ -1008,6 +1128,14 @@ func (g *Game) CommandSubmit() {
 	case "/terminar", "/endday":
 		if g.HREndLevel > 0 {
 			g.endDay() // settles the quota now: short score means fired
+		} else {
+			g.CommandErr = CommandErrTime
+		}
+	case "/terminal":
+		// the old system only answers once the story is awake and the
+		// player holds at least one clue; before that it stays a secret
+		if g.TerminalAvailable() {
+			g.EnterTerminal()
 		} else {
 			g.CommandErr = CommandErrTime
 		}
@@ -1082,6 +1210,7 @@ func (g *Game) ExitShop() {
 // points equal to the day number and starts the next day; falling short
 // gets the player fired and the run erased (HR points survive).
 func (g *Game) endDay() {
+	g.checkStoryTriggers() // day-boundary rituals see today's final numbers
 	code := Languages[g.LangIndex].Code
 	g.DayEndQuota = g.DayQuota()
 	g.QuipShown = 0
@@ -1105,16 +1234,26 @@ func (g *Game) endDay() {
 		}
 		g.Day++
 		g.BestDay = max(g.BestDay, g.Day)
+		g.maybeAdvanceStory() // BestDay gates re-check at every day boundary
 		g.DayTimer = g.DayLength()
 		g.dayQuota = g.computeQuota() // lock tomorrow's quota with today's upgrades
 		g.resetDayStats()
+		g.CorruptToday = 0
+		g.possessedToday = false
 		g.DayEndFired = false
 		g.DayEndQuip = pickQuip(len(PaydayScripts[code]), &g.lastPayday)
+		g.pickDayEndStory()
+		g.DayEndCode = ""
+		if g.StoryStage == 5 && !g.storyDocs["acceso"] {
+			g.DayEndCode = DayEndCodeText // the payroll anomaly shows its digits
+		}
 	} else {
 		g.DayEndFired = true
 		g.DayEndFirst = false
 		g.DayEndGainHR = 0
 		g.DayEndNextPay = 0
+		g.DayEndStory = false
+		g.DayEndCode = ""
 		g.DayEndQuip = pickQuip(len(FiredScripts[code]), &g.lastFired)
 		g.RunActive = false
 		g.savedRun = nil
@@ -1144,6 +1283,12 @@ func (g *Game) dayEndLines() []string {
 	}
 	if g.DayEndFirst {
 		return HRExplainScripts[code]
+	}
+	if g.DayEndStory {
+		act := min(g.StoryStage, StoryEndAct)
+		if pool := StoryQuipScripts[act]; pool != nil && g.dayEndStoryIdx < len(pool[code]) {
+			return []string{pool[code][g.dayEndStoryIdx]}
+		}
 	}
 	return []string{PaydayScripts[code][g.DayEndQuip]}
 }
@@ -1197,6 +1342,12 @@ func (g *Game) DayEndEnter() {
 // (when yesterday left stats worth mocking) a stat-aware line, otherwise a
 // plain one. Stat templates use {words}, {fails}, {worst} and {worstn}.
 func (g *Game) composeDayStart() {
+	g.DayStartStory = false
+	if q := g.storyDayBeat(); q != "" {
+		g.DayStartText = q
+		g.DayStartStory = true
+		return
+	}
 	code := Languages[g.LangIndex].Code
 	if g.LastDayWorst != "" && rand.IntN(2) == 0 {
 		t := DayStartStatScripts[code][pickQuip(len(DayStartStatScripts[code]), &g.lastStartStat)]
@@ -1476,6 +1627,16 @@ func (g *Game) ErrorFlashing() bool {
 // claims the word here — at the word boundary — making it urgent instead
 // of golden.
 func (g *Game) nextWord() {
+	g.WordCorrupt = false
+	if g.corruptArmed {
+		// the corrupt signal claims the boundary first; an armed
+		// inspection stays armed for the following word
+		g.corruptArmed = false
+		g.claimCorrupt()
+		if g.WordCorrupt {
+			return
+		}
+	}
 	g.Word = g.pickWord(g.Word)
 	g.Pos = 0
 	if g.InspectionArmed {

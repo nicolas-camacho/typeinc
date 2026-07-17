@@ -4,7 +4,34 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 )
+
+// SaveVersion is the game version the save format belongs to. Loading a
+// file with a LOWER version (or none at all) wipes all progress and keeps
+// only the settings — bump it exactly when a release must invalidate old
+// saves; compatible releases leave it alone.
+const SaveVersion = "0.3.0"
+
+// saveVersionLess compares two dotted version strings numerically part by
+// part ("0.10.0" > "0.3.0"); malformed or empty versions count as older.
+func saveVersionLess(a, b string) bool {
+	pa, pb := strings.Split(a, "."), strings.Split(b, ".")
+	for i := range max(len(pa), len(pb)) {
+		na, nb := 0, 0
+		if i < len(pa) {
+			na, _ = strconv.Atoi(pa[i])
+		}
+		if i < len(pb) {
+			nb, _ = strconv.Atoi(pb[i])
+		}
+		if na != nb {
+			return na < nb
+		}
+	}
+	return false
+}
 
 // RunData is the persisted state of a run in progress.
 type RunData struct {
@@ -23,12 +50,19 @@ type RunData struct {
 	DayFails         int
 	DayBestStreak    int
 	DayFailCounts    map[string]int
+
+	// story run state: triggers already fired can't be re-farmed by
+	// save-quit-resume, but a fresh run re-experiences them
+	CorruptToday    int      `json:",omitempty"`
+	RitualDone      []string `json:",omitempty"`
+	StoryDaysNoBeat int      `json:",omitempty"`
 }
 
 // SaveData is the on-disk save file, shared by the desktop and TUI
-// frontends. HR fields live outside Run: they survive across runs.
+// frontends. HR fields live outside Run: they survive across runs. The
+// old integer Version field of pre-0.3.0 saves is simply ignored on load.
 type SaveData struct {
-	Version     int
+	GameVersion string   // dotted game version, checked against SaveVersion
 	Run         *RunData // nil when no run is saved
 	LangIndex   int
 	Volume      float64
@@ -46,6 +80,13 @@ type SaveData struct {
 	BestStreak int
 	BestDay    int
 	FailCounts map[string]int
+
+	// background mystery, meta layer: survives firings like HR points
+	StoryStage   int            `json:",omitempty"`
+	StoryClues   []string       `json:",omitempty"`
+	StoryDocs    []string       `json:",omitempty"`
+	MarkedCounts map[string]int `json:",omitempty"`
+	TermOpened   bool           `json:",omitempty"`
 }
 
 // DefaultSavePath is the shared save location
@@ -66,7 +107,7 @@ func (g *Game) Save() {
 		return
 	}
 	data := SaveData{
-		Version:     2,
+		GameVersion: SaveVersion,
 		LangIndex:   g.LangIndex,
 		Volume:      g.Volume,
 		DisplayMode: g.DisplayMode,
@@ -83,6 +124,12 @@ func (g *Game) Save() {
 		BestStreak: g.BestStreak,
 		BestDay:    g.BestDay,
 		FailCounts: g.FailCounts,
+
+		StoryStage:   g.StoryStage,
+		StoryClues:   boolSetToSlice(g.storyClues),
+		StoryDocs:    boolSetToSlice(g.storyDocs),
+		MarkedCounts: g.markedCounts,
+		TermOpened:   g.termOpened,
 	}
 	if g.RunActive {
 		data.Run = &RunData{
@@ -101,6 +148,10 @@ func (g *Game) Save() {
 			DayFails:         g.DayFails,
 			DayBestStreak:    g.DayBestStreak,
 			DayFailCounts:    g.dayFailCounts,
+
+			CorruptToday:    g.CorruptToday,
+			RitualDone:      boolSetToSlice(g.ritualDone),
+			StoryDaysNoBeat: g.storyDaysNoBeat,
 		}
 	} else if g.savedRun != nil {
 		data.Run = g.savedRun
@@ -139,6 +190,12 @@ func (g *Game) Load() {
 	if data.DisplayMode >= 0 && data.DisplayMode < len(uiTables["es"].DisplayModes) {
 		g.DisplayMode = data.DisplayMode
 	}
+	if saveVersionLess(data.GameVersion, SaveVersion) {
+		// pre-0.3.0 save (or no version field at all): the format changed
+		// incompatibly — keep the settings applied above, drop all
+		// progress; the next Save() rewrites the file at SaveVersion
+		return
+	}
 	if data.HRPoints > 0 {
 		g.HRPoints = data.HRPoints
 	}
@@ -172,5 +229,22 @@ func (g *Game) Load() {
 	if data.FailCounts != nil {
 		g.FailCounts = data.FailCounts
 	}
+	if data.StoryStage > 0 {
+		g.StoryStage = min(data.StoryStage, StoryEndAct)
+	}
+	if data.StoryClues != nil {
+		g.storyClues = sliceToBoolSet(data.StoryClues)
+	}
+	if data.StoryDocs != nil {
+		g.storyDocs = sliceToBoolSet(data.StoryDocs)
+	}
+	if data.MarkedCounts != nil {
+		g.markedCounts = data.MarkedCounts
+	}
+	if data.TermOpened {
+		g.termOpened = true
+	}
 	g.savedRun = data.Run
+	// old saves may already sit past the day gates: let the story catch up
+	g.maybeAdvanceStory()
 }

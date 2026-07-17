@@ -14,7 +14,7 @@ Still v0.x — mechanics and balance change often.
   and the streak.
 - **Combo** — consecutive words without a mistake build a streak: +10% per
   word, capped (`MAX STREAK` upgrade raises the cap).
-- **Day cycle** — a day lasts 90s of active play (pauses in menus, shop and
+- **Day cycle** — a day lasts 60s of active play (pauses in menus, shop and
   command mode). At day end HR charges the **quota**, locked at day start:
   exponential in the day number and inflated by the upgrades you owned when
   the day began. Cover it and the next day starts; fall short and you are

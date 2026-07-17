@@ -167,6 +167,30 @@ func TestIntroTypewriterAndEnterFlow(t *testing.T) {
 	}
 }
 
+func TestIntroSkipJumpsStraightToPlay(t *testing.T) {
+	// new game: skip mid-story starts a fresh run
+	g := New()
+	g.MenuIndex = 0 // NUEVA PARTIDA
+	g.MenuSelect()
+	g.Tick(0.1) // half-revealed first line
+	g.IntroSkip()
+	if g.Scene != ScenePlay || !g.RunActive {
+		t.Fatalf("Scene = %v, RunActive = %v after skip, want ScenePlay, true", g.Scene, g.RunActive)
+	}
+
+	// CONTINUAR: skip the return quip keeps the restored run intact
+	g.Score = 321
+	g.BackToMenu()
+	g.continueRun()
+	if g.Scene != SceneIntro {
+		t.Fatalf("Scene = %v after CONTINUAR, want SceneIntro", g.Scene)
+	}
+	g.IntroSkip()
+	if g.Scene != ScenePlay || g.Score != 321 {
+		t.Fatalf("Scene = %v, Score = %d after skipping the return quip, want ScenePlay, 321", g.Scene, g.Score)
+	}
+}
+
 func TestMenuCommandPausesAndPlayResumes(t *testing.T) {
 	g := startPlay(t, "casa")
 	g.Score = 123
@@ -394,14 +418,14 @@ func TestDayQuotaScalesWithDayUpgradesAndHR(t *testing.T) {
 	if got := g.computeQuota(); got != 240 {
 		t.Fatalf("computeQuota() day 3 = %d, want 240", got)
 	}
-	g.MultLevel = 2 // +0.70
+	g.MultLevel = 2 // +0.50
 	g.StreakCapLevel = 1
-	if got := g.computeQuota(); got != 444 { // 240.25 × 1.85
-		t.Fatalf("computeQuota() with upgrades = %d, want 444", got)
+	if got := g.computeQuota(); got != 380 { // 240.25 × 1.58
+		t.Fatalf("computeQuota() with upgrades = %d, want 380", got)
 	}
 	g.HRQuotaLevel = 5 // −50%
-	if got := g.computeQuota(); got != 222 {
-		t.Fatalf("computeQuota() with max hrquota = %d, want 222", got)
+	if got := g.computeQuota(); got != 190 {
+		t.Fatalf("computeQuota() with max hrquota = %d, want 190", got)
 	}
 }
 
@@ -876,9 +900,9 @@ func TestGoldenLevelPersistsAcrossSaveLoad(t *testing.T) {
 
 func TestQuotaIncludesGoldenTerm(t *testing.T) {
 	g := startPlay(t, "casa")
-	g.GoldenLevel = 4 // 100 × (1 + 0.08×4) = 132
-	if got := g.computeQuota(); got != 132 {
-		t.Fatalf("computeQuota() with golden 4 = %d, want 132", got)
+	g.GoldenLevel = 4 // 100 × (1 + 0.04×4) = 116
+	if got := g.computeQuota(); got != 116 {
+		t.Fatalf("computeQuota() with golden 4 = %d, want 116", got)
 	}
 }
 
@@ -1030,9 +1054,9 @@ func TestInternPersistence(t *testing.T) {
 func TestQuotaIncludesInternTerms(t *testing.T) {
 	g := startPlay(t, "casa")
 	g.Interns = []Intern{{Word: "sol"}, {Word: "mar"}}
-	g.InternSpeedLevel = 1 // 100 × (1 + 0.25×2 + 0.08) = 158
-	if got := g.computeQuota(); got != 158 {
-		t.Fatalf("computeQuota() with 2 interns + speed 1 = %d, want 158", got)
+	g.InternSpeedLevel = 1 // 100 × (1 + 0.15×2 + 0.04) = 134
+	if got := g.computeQuota(); got != 134 {
+		t.Fatalf("computeQuota() with 2 interns + speed 1 = %d, want 134", got)
 	}
 }
 

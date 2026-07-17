@@ -1,3 +1,4 @@
 *.exe
 *.syso
 assets/
+graphify-out/

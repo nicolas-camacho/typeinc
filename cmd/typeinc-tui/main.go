@@ -30,6 +30,10 @@ var (
 	errorTextStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#D6336C")).Bold(true)
 	comboStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF6B35")).Bold(true)
 
+	// "the other channel": corrupt words, possessed interns, the terminal
+	corruptStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#B14AED")).Bold(true)
+	corruptGhostStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#B14AED")).Faint(true)
+
 	// day progress bar: blue start, purple past halfway, red in the last 10%
 	barBlueStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#1B4EF5"))
 	barPurpleStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#8140DC"))
@@ -85,8 +89,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case game.SceneIntro:
-			if msg.String() == "enter" {
+			switch msg.String() {
+			case "enter":
 				m.g.IntroEnter()
+			case "esc":
+				m.g.IntroSkip()
 			}
 		case game.ScenePlay:
 			switch msg.String() {
@@ -103,7 +110,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.g.CommandSubmit()
 				}
 			default:
-				if msg.Type == tea.KeyRunes {
+				// KeySpace carries Runes{' '}: corrupt phrases have spaces
+				if msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace {
 					for _, r := range msg.Runes {
 						m.g.TypeChar(r)
 					}
@@ -143,6 +151,21 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.String() == "esc" {
 				m.g.StatsBack()
 			}
+		case game.SceneTerminal:
+			switch msg.String() {
+			case "esc":
+				m.g.TermExit()
+			case "backspace":
+				m.g.TermBackspace()
+			case "enter":
+				m.g.TermSubmit()
+			default:
+				if msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace {
+					for _, r := range msg.Runes {
+						m.g.TermTypeChar(r)
+					}
+				}
+			}
 		}
 	}
 	return m, nil
@@ -167,6 +190,8 @@ func (m model) View() string {
 		return m.viewDayStart()
 	case game.SceneStats:
 		return m.viewStats()
+	case game.SceneTerminal:
+		return m.viewTerminal()
 	}
 	return m.viewPlay()
 }
@@ -218,7 +243,9 @@ func (m model) styledWord() string {
 		return successStyle.Render(" " + w + " ")
 	}
 	typedSt, ghostSt := typedStyle, ghostStyle
-	if m.g.WordGolden {
+	if m.g.WordCorrupt {
+		typedSt, ghostSt = corruptStyle, corruptGhostStyle
+	} else if m.g.WordGolden {
 		typedSt, ghostSt = goldStyle, goldGhostStyle
 	}
 	var b strings.Builder
@@ -244,8 +271,10 @@ func (m model) viewPlay() string {
 	// points gained floats above the word (a golden or urgent word
 	// announces itself there while typing); streak + combo sit below it
 	gain := " "
-	if m.g.Phase == game.PhaseSuccess {
+	if m.g.Phase == game.PhaseSuccess && m.g.LastGain > 0 {
 		gain = goldStyle.Render(fmt.Sprintf("+%d", m.g.LastGain))
+	} else if m.g.Phase == game.PhaseTyping && m.g.WordCorrupt {
+		gain = corruptStyle.Render(fmt.Sprintf("%s %d", ui.CorruptLabel, int(math.Ceil(m.g.CorruptTimer))))
 	} else if m.g.Phase == game.PhaseTyping && m.g.InspectionActive() {
 		gain = errorTextStyle.Render(fmt.Sprintf("%s %d", ui.InspectionLabel, int(math.Ceil(m.g.InspectionLeft()))))
 	} else if m.g.Phase == game.PhaseTyping && m.g.WordGolden {
@@ -279,9 +308,12 @@ func (m model) viewPlay() string {
 		topLine = banner + lipgloss.PlaceHorizontal(max(1, m.width-lipgloss.Width(banner)), lipgloss.Right, top)
 	}
 
-	// event announce line under the top row, visible for the whole event
+	// event announce line under the top row, visible for the whole event;
+	// story toasts take the same slot in violet
 	toast := " "
-	if m.g.EventToastVisible() {
+	if m.g.StoryToastTimer > 0 {
+		toast = corruptStyle.Render(m.g.StoryToast)
+	} else if m.g.EventToastVisible() {
 		toast = dimStyle.Render(m.g.EventToast)
 	}
 	toastLine := lipgloss.PlaceHorizontal(m.width, lipgloss.Center, toast)
@@ -308,11 +340,15 @@ func (m model) internColumn() string {
 	lines := make([]string, 0, len(m.g.Interns))
 	for _, in := range m.g.Interns {
 		var b strings.Builder
+		typedSt, ghostSt := typedStyle, ghostStyle
+		if in.Possessed {
+			typedSt, ghostSt = corruptStyle, corruptGhostStyle
+		}
 		if in.Pos > 0 {
-			b.WriteString(typedStyle.Render(in.Word[:in.Pos]))
+			b.WriteString(typedSt.Render(in.Word[:in.Pos]))
 		}
 		if in.Pos < len(in.Word) {
-			b.WriteString(ghostStyle.Render(in.Word[in.Pos:]))
+			b.WriteString(ghostSt.Render(in.Word[in.Pos:]))
 		}
 		if in.GainTimer > 0 {
 			b.WriteString(goldStyle.Render(fmt.Sprintf(" +%d", in.LastGain)))
@@ -389,8 +425,11 @@ func (m model) viewDayEnd() string {
 		title = errorTextStyle.Render(spaced(ui.FiredTitle))
 	}
 
-	quip := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#FFFFFF")).
+	quipStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFFFF"))
+	if m.g.DayEndStory {
+		quipStyle = corruptStyle
+	}
+	quip := quipStyle.
 		Width(min(70, max(20, m.width-8))).
 		Align(lipgloss.Center).
 		Render(m.g.DayEndQuipVisible())
@@ -408,6 +447,10 @@ func (m model) viewDayEnd() string {
 			ui.StatsWords, m.g.LastDayWords, ui.StatsFails, m.g.LastDayFails,
 			ui.StatsStreak, m.g.LastDayBestStreak, ui.StatsWorst, worst))
 		breakdown = errorTextStyle.Render(fmt.Sprintf("%s: -%d", ui.QuotaLabel, m.g.DayEndQuota))
+		// act-5 payroll anomaly: its digits glitch in beside the quota
+		if m.g.DayEndCode != "" {
+			breakdown += " " + corruptStyle.Render("["+m.g.DayEndCode+"]")
+		}
 		if !m.g.DayEndFired {
 			if m.g.DayEndGainHR > 0 {
 				breakdown += "   " + goldStyle.Render(fmt.Sprintf("%s: +%d", ui.HRPointsLbl, m.g.DayEndGainHR))
@@ -424,8 +467,11 @@ func (m model) viewDayEnd() string {
 func (m model) viewDayStart() string {
 	ui := m.g.UI()
 	title := titleStyle.Render(spaced(fmt.Sprintf("%s %d", ui.DayLabel, m.g.Day)))
-	quip := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#FFFFFF")).
+	quipStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFFFF"))
+	if m.g.DayStartStory {
+		quipStyle = corruptStyle
+	}
+	quip := quipStyle.
 		Width(min(70, max(20, m.width-8))).
 		Align(lipgloss.Center).
 		Render(m.g.DayStartVisible())
@@ -507,6 +553,33 @@ func (m model) viewHR() string {
 	ptsLine := lipgloss.PlaceHorizontal(m.width, lipgloss.Right,
 		goldStyle.Render(fmt.Sprintf("%s: %d ", ui.HRPointsLbl, m.g.HRPoints)))
 	return ptsLine + "\n" + body
+}
+
+// viewTerminal renders the hidden story terminal: the tail of the session
+// log above a prompt line, left-aligned, in the violet channel.
+func (m model) viewTerminal() string {
+	ui := m.g.UI()
+	wrap := lipgloss.NewStyle().Width(max(20, m.width-4))
+
+	var lines []string
+	for _, l := range m.g.TermLog {
+		st := dimStyle
+		if strings.HasPrefix(l, "> ") {
+			st = corruptStyle
+		}
+		lines = append(lines, strings.Split(wrap.Render(st.Render(l)), "\n")...)
+	}
+	visible := max(1, m.height-4)
+	if len(lines) > visible {
+		lines = lines[len(lines)-visible:]
+	}
+	log := strings.Join(lines, "\n")
+
+	prompt := corruptStyle.Render("> " + m.g.TermBuf + "█")
+	hint := dimStyle.Render(strings.ToLower(ui.TermHint))
+	body := lipgloss.JoinVertical(lipgloss.Left, log, "", prompt, hint)
+	return lipgloss.Place(m.width, m.height, lipgloss.Left, lipgloss.Bottom,
+		lipgloss.NewStyle().Padding(0, 2).Render(body))
 }
 
 // spaced renders a title with letter spacing ("SHOP" -> "S H O P").

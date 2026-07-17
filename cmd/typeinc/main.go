@@ -38,6 +38,10 @@ var (
 	successColor   = rl.NewColor(0x2F, 0xA0, 0x84, 0xFF) // completed-word highlight
 	comboColor     = rl.NewColor(0xFF, 0x6B, 0x35, 0xFF) // active combo multiplier
 
+	// "the other channel": corrupt words, possessed interns, the terminal
+	corruptColor      = rl.NewColor(0xB1, 0x4A, 0xED, 0xFF)
+	corruptGhostColor = rl.NewColor(0xB1, 0x4A, 0xED, 0x55)
+
 	// day progress bar: blue start, purple past halfway, red in the last 10%
 	barBlue   = rl.NewColor(0x1B, 0x4E, 0xF5, 0xFF)
 	barPurple = rl.NewColor(0x81, 0x40, 0xDC, 0xFF)
@@ -175,6 +179,8 @@ func main() {
 			drawDayStart(g, f)
 		case game.SceneStats:
 			drawStats(g, f)
+		case game.SceneTerminal:
+			drawTerminal(g, f)
 		}
 		rl.EndDrawing()
 
@@ -227,6 +233,9 @@ func update(g *game.Game) {
 	case game.SceneIntro:
 		if rl.IsKeyPressed(rl.KeyEnter) {
 			g.IntroEnter()
+		}
+		if rl.IsKeyPressed(rl.KeyEscape) {
+			g.IntroSkip()
 		}
 		// typewriter key sound: one tap per newly revealed character
 		cur := len([]rune(g.IntroVisible()))
@@ -318,6 +327,20 @@ func update(g *game.Game) {
 		if rl.IsKeyPressed(rl.KeyEscape) {
 			g.StatsBack()
 		}
+	case game.SceneTerminal:
+		if rl.IsKeyPressed(rl.KeyEscape) {
+			g.TermExit()
+		}
+		if rl.IsKeyPressed(rl.KeyBackspace) {
+			g.TermBackspace()
+		}
+		if rl.IsKeyPressed(rl.KeyEnter) {
+			g.TermSubmit()
+		}
+		for r := rl.GetCharPressed(); r != 0; r = rl.GetCharPressed() {
+			rl.PlaySound(keySound)
+			g.TermTypeChar(r)
+		}
 	}
 }
 
@@ -401,17 +424,26 @@ func drawPlay(g *game.Game, f fonts) {
 		rl.DrawRectangle(int32(pos.X)-16, int32(pos.Y)-8, int32(m.X)+32, int32(m.Y)+16, errorColor)
 	} else if g.Phase == game.PhaseSuccess {
 		rl.DrawRectangle(int32(pos.X)-16, int32(pos.Y)-8, int32(m.X)+32, int32(m.Y)+16, successColor)
-		// points gained, gold, floating above the word
-		gain := "+" + strconv.Itoa(g.LastGain)
-		gm := rl.MeasureTextEx(f.word, gain, wordSize, 0)
-		rl.DrawTextEx(f.word, gain, rl.Vector2{X: (screenW - gm.X) / 2, Y: pos.Y - gm.Y - 24}, wordSize, 0, goldColor)
+		// points gained, gold, floating above the word (a corrupt word
+		// pays nothing: its story toast shows below instead)
+		if g.LastGain > 0 {
+			gain := "+" + strconv.Itoa(g.LastGain)
+			gm := rl.MeasureTextEx(f.word, gain, wordSize, 0)
+			rl.DrawTextEx(f.word, gain, rl.Vector2{X: (screenW - gm.X) / 2, Y: pos.Y - gm.Y - 24}, wordSize, 0, goldColor)
+		}
 	}
 
 	// ghost word with the correctly typed prefix drawn on top; monospace
 	// font keeps both perfectly aligned; golden words render in gold, an
 	// urgent (inspection) word announces itself with its countdown
 	ghost, typed := ghostColor, rl.White
-	if g.WordGolden {
+	if g.WordCorrupt {
+		ghost, typed = corruptGhostColor, corruptColor
+		if g.Phase == game.PhaseTyping {
+			label := fmt.Sprintf("%s %d", g.UI().CorruptLabel, int(math.Ceil(g.CorruptTimer)))
+			drawCentered(f.ui, label, pos.Y-uiSize-24, uiSize, corruptColor)
+		}
+	} else if g.WordGolden {
 		ghost, typed = goldGhostColor, goldColor
 		if g.Phase == game.PhaseTyping {
 			drawCentered(f.ui, g.UI().GoldenLabel, pos.Y-uiSize-24, uiSize, goldColor)
@@ -465,6 +497,12 @@ func drawPlay(g *game.Game, f fonts) {
 		drawCentered(f.ui, banner, 24+uiSize*1.4, uiSize, goldColor)
 	}
 
+	// story toast (corrupt/marked/possession payoffs), violet, above the
+	// command bar slot
+	if g.StoryToastTimer > 0 {
+		drawCentered(f.ui, g.StoryToast, screenH-uiSize*4.6, uiSize, corruptColor)
+	}
+
 	// command bar / unknown-command message, bottom center
 	if g.CommandMode {
 		drawCentered(f.ui, g.CommandBuf+"_", screenH-uiSize*3, uiSize, rl.White)
@@ -486,10 +524,14 @@ func drawInterns(g *game.Game, f fonts) {
 	y := (screenH - lineH*float32(len(g.Interns))) / 2
 	for _, in := range g.Interns {
 		pos := rl.Vector2{X: 32, Y: y}
-		rl.DrawTextEx(f.ui, in.Word, pos, uiSize, 0, ghostColor)
+		ghost, typed := ghostColor, rl.White
+		if in.Possessed {
+			ghost, typed = corruptGhostColor, corruptColor
+		}
+		rl.DrawTextEx(f.ui, in.Word, pos, uiSize, 0, ghost)
 		w := rl.MeasureTextEx(f.ui, in.Word, uiSize, 0).X
 		if in.Pos > 0 {
-			rl.DrawTextEx(f.ui, in.Word[:in.Pos], pos, uiSize, 0, rl.White)
+			rl.DrawTextEx(f.ui, in.Word[:in.Pos], pos, uiSize, 0, typed)
 		}
 		if in.GainTimer > 0 {
 			gain := "+" + strconv.Itoa(in.LastGain)
@@ -582,11 +624,15 @@ func drawDayEnd(g *game.Game, f fonts) {
 
 	// HR quip, typewriter-revealed (the first payday explains HR points,
 	// so the block can run several lines)
+	quipCol := rl.White
+	if g.DayEndStory {
+		quipCol = corruptColor
+	}
 	lines := wrapText(f.ui, g.DayEndQuipVisible(), uiSize, screenW*0.8)
 	lineH := float32(uiSize) * 1.4
 	quipY := screenH * 0.32
 	for i, line := range lines {
-		drawCentered(f.ui, line, quipY+float32(i)*lineH, uiSize, rl.White)
+		drawCentered(f.ui, line, quipY+float32(i)*lineH, uiSize, quipCol)
 	}
 
 	// numbers only after the script's last line (the first payday runs
@@ -607,7 +653,14 @@ func drawDayEnd(g *game.Game, f fonts) {
 
 		// settlement breakdown; HR points only land on payroll days, the
 		// rest show when the next payroll comes
-		drawCentered(f.ui, ui.QuotaLabel+": -"+strconv.Itoa(g.DayEndQuota), y, uiSize, errorColor)
+		quotaLine := ui.QuotaLabel + ": -" + strconv.Itoa(g.DayEndQuota)
+		drawCentered(f.ui, quotaLine, y, uiSize, errorColor)
+		// act-5 payroll anomaly: its digits glitch in beside the quota
+		if g.DayEndCode != "" {
+			qw := rl.MeasureTextEx(f.ui, quotaLine, uiSize, 0).X
+			rl.DrawTextEx(f.ui, "["+g.DayEndCode+"]",
+				rl.Vector2{X: (screenW+qw)/2 + 20, Y: y}, uiSize, 0, corruptColor)
+		}
 		if !g.DayEndFired {
 			y += lineH
 			if g.DayEndGainHR > 0 {
@@ -626,10 +679,14 @@ func drawDayStart(g *game.Game, f fonts) {
 	ui := g.UI()
 	drawCentered(f.title, ui.DayLabel+" "+strconv.Itoa(g.Day), screenH*0.2, titleSize, rl.White)
 
+	quipCol := rl.White
+	if g.DayStartStory {
+		quipCol = corruptColor
+	}
 	lines := wrapText(f.ui, g.DayStartVisible(), uiSize, screenW*0.8)
 	lineH := float32(uiSize) * 1.4
 	for i, line := range lines {
-		drawCentered(f.ui, line, screenH*0.45+float32(i)*lineH, uiSize, rl.White)
+		drawCentered(f.ui, line, screenH*0.45+float32(i)*lineH, uiSize, quipCol)
 	}
 
 	if g.DayStartDone() {
@@ -712,4 +769,37 @@ func drawHR(g *game.Game, f fonts) {
 	}
 
 	drawCentered(f.ui, ui.HRHint, screenH-uiSize*3, uiSize, ghostColor)
+}
+
+// drawTerminal renders the hidden story terminal: session log stacked
+// above a prompt line, all in the violet channel.
+func drawTerminal(g *game.Game, f fonts) {
+	ui := g.UI()
+	lineH := float32(uiSize) * 1.3
+	margin := float32(48)
+
+	promptY := screenH - uiSize*3 - lineH
+	rl.DrawTextEx(f.ui, "> "+g.TermBuf+"_", rl.Vector2{X: margin, Y: promptY}, uiSize, 0, corruptColor)
+	rl.DrawTextEx(f.ui, ui.TermHint, rl.Vector2{X: margin, Y: screenH - uiSize*2}, uiSize, 0, ghostColor)
+
+	// log: wrap every line at draw time, then render only what fits above
+	// the prompt, bottom-anchored
+	maxW := screenW - margin*2
+	var lines []string
+	for _, l := range g.TermLog {
+		lines = append(lines, wrapText(f.ui, l, uiSize, maxW)...)
+	}
+	visible := int((promptY - margin) / lineH)
+	if visible < len(lines) {
+		lines = lines[len(lines)-visible:]
+	}
+	y := promptY - lineH*float32(len(lines)) - lineH*0.5
+	for _, l := range lines {
+		col := dimColor
+		if strings.HasPrefix(l, "> ") {
+			col = corruptColor
+		}
+		rl.DrawTextEx(f.ui, l, rl.Vector2{X: margin, Y: y}, uiSize, 0, col)
+		y += lineH
+	}
 }

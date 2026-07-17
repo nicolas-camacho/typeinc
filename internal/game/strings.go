@@ -50,6 +50,21 @@ type UIStrings struct {
 	StatsHint       string
 	NoneLabel       string // placeholder when there is no worst word yet
 
+	CorruptLabel string // shown above a corrupt word
+
+	// hidden story terminal
+	MenuTerminal    string // main-menu entry, only once discovered
+	TermBanner      string
+	TermHelpHint    string
+	TermHelp        []string
+	TermUnknown     string
+	TermLocked      string // reading a keyed doc without its key
+	TermLockedTag   string // listing placeholder for locked docs
+	TermDocsHeader  string
+	TermKeyAccepted string
+	TermNoDocs      string
+	TermHint        string // scene footer
+
 	UpgradeNames map[string]string // keyed by Upgrade.ID
 }
 
@@ -71,7 +86,7 @@ var uiTables = map[string]UIStrings{
 		MenuHint:    "FLECHAS + ENTER",
 		OptionsHint: "FLECHAS AJUSTAN · ESC VUELVE",
 		ShopHint:    "ENTER COMPRA · ESC VUELVE",
-		IntroHint:   "ENTER",
+		IntroHint:   "ENTER · ESC SALTA",
 
 		ShopTitle:  "TIENDA",
 		UnknownCmd: "COMANDO DESCONOCIDO",
@@ -103,6 +118,26 @@ var uiTables = map[string]UIStrings{
 		StatsHint:       "ESC VUELVE",
 		NoneLabel:       "—",
 
+		CorruptLabel: "SEÑAL DESCONOCIDA",
+
+		MenuTerminal: "/TERMINAL",
+		TermBanner:   "SISTEMA ANTIGUO v0.77 — ACCESO NO AUTORIZADO",
+		TermHelpHint: "escribe 'ayuda' si te atreves",
+		TermHelp: []string{
+			"ayuda — esta lista",
+			"archivos — documentos del sistema",
+			"leer <id> — abre un documento",
+			"salir — vuelve al trabajo",
+			"cualquier otra cosa se interpreta como una llave",
+		},
+		TermUnknown:     "no reconocido. el sistema lo ha anotado igualmente.",
+		TermLocked:      "BLOQUEADO. este documento requiere una llave.",
+		TermLockedTag:   "[BLOQUEADO]",
+		TermDocsHeader:  "DOCUMENTOS:",
+		TermKeyAccepted: "LLAVE ACEPTADA. abriendo...",
+		TermNoDocs:      "no hay documentos. todavía.",
+		TermHint:        "ESC VUELVE",
+
 		UpgradeNames: map[string]string{
 			"mult":        "MULTIPLICADOR",
 			"streakcap":   "RACHA MÁXIMA",
@@ -133,7 +168,7 @@ var uiTables = map[string]UIStrings{
 		MenuHint:    "ARROWS + ENTER",
 		OptionsHint: "ARROWS ADJUST · ESC BACK",
 		ShopHint:    "ENTER BUYS · ESC BACK",
-		IntroHint:   "ENTER",
+		IntroHint:   "ENTER · ESC SKIPS",
 
 		ShopTitle:  "SHOP",
 		UnknownCmd: "UNKNOWN COMMAND",
@@ -164,6 +199,26 @@ var uiTables = map[string]UIStrings{
 		StatsTop:        "TOP FAILS",
 		StatsHint:       "ESC BACK",
 		NoneLabel:       "—",
+
+		CorruptLabel: "UNKNOWN SIGNAL",
+
+		MenuTerminal: "/TERMINAL",
+		TermBanner:   "LEGACY SYSTEM v0.77 — UNAUTHORIZED ACCESS",
+		TermHelpHint: "type 'help' if you dare",
+		TermHelp: []string{
+			"help — this list",
+			"docs — system documents",
+			"read <id> — opens a document",
+			"exit — back to work",
+			"anything else is treated as a key",
+		},
+		TermUnknown:     "not recognized. the system logged it anyway.",
+		TermLocked:      "LOCKED. this document requires a key.",
+		TermLockedTag:   "[LOCKED]",
+		TermDocsHeader:  "DOCUMENTS:",
+		TermKeyAccepted: "KEY ACCEPTED. opening...",
+		TermNoDocs:      "no documents. yet.",
+		TermHint:        "ESC BACK",
 
 		UpgradeNames: map[string]string{
 			"mult":        "MULTIPLIER",
